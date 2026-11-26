@@ -56,7 +56,7 @@ flowchart LR
 Нужен Python 3.10+.
 
 ```bash
-git clone <этот репозиторий> && cd reqaudit
+git clone https://github.com/Aldibek/AI_agent_hack.git && cd AI_agent_hack
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
@@ -130,7 +130,7 @@ python -m reqaudit <путь к файлу требований> <путь к ф
 Пример:
 
 ```bash
-python -m reqaudit ../ai-requirements-validator-task/docs/requirements.pdf reports/report.md
+python -m reqaudit docs/requirements.pdf reports/report.md
 ```
 
 Куда ложатся результаты:
@@ -154,11 +154,11 @@ python -m reqaudit ../ai-requirements-validator-task/docs/requirements.pdf repor
 
 ```bash
 # 1) мгновенно, без ключа: только правила
-python -m reqaudit ../ai-requirements-validator-task/docs/requirements.md reports/rules.md --no-llm
+python -m reqaudit docs/requirements.md reports/rules.md --no-llm
 # 2) полный прогон: консилиум, оркестратор, судья (~7 мин; повторный запуск берёт ответы из кэша)
-python -m reqaudit ../ai-requirements-validator-task/docs/requirements.md reports/report.md
+python -m reqaudit docs/requirements.md reports/report.md
 # 3) человек в контуре: ответить на главные вопросы и получить исправленные формулировки (ТЗ v2)
-python -m reqaudit ../ai-requirements-validator-task/docs/requirements.md reports/report.md --interactive
+python -m reqaudit docs/requirements.md reports/report.md --interactive
 ```
 
 Повторяемость: при `temperature=0` и одинаковом входе повторный прогон берёт ответы моделей из кэша
@@ -228,4 +228,6 @@ reqaudit/
   report_html.py наглядный HTML-отчёт с подсветкой
 eval/            эталон, скрипт оценки, документ для проверки устойчивости
 tests/           модульные тесты
+docs/            задание хакатона (TASK.md), проверяемый документ (requirements.md/.pdf), проект пайплайна (PIPELINE.md)
+submission/      материалы для сдачи: отчёт агента (.md/.html/.json)
 ```
