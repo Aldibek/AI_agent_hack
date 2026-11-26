@@ -360,7 +360,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
         result.judge_independent = judge.label not in [clients[n].label for n in reviewers]
         payload = json.dumps([_compact(f, cid) for cid, f in ids.items() if f.proof != "Ш"], ensure_ascii=False)
         try:
-            log(f"судья: {judge.label}" + ("" if result.judge_independent else " (не независим: участвовал в ревью)"))
+            log(f"критик: {judge.label}" + ("" if result.judge_independent else " (отдельный вызов той же модели)"))
             data = judge.chat_json(prompts.JUDGE_SYSTEM, prompts.judge_user(payload, doc.numbered_text()), max_tokens=40000,
                                    role="judge")
             by_id = ids
