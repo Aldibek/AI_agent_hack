@@ -295,6 +295,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
 
     # ---------------------------------------------------------------- оркестратор
     ids: dict[str, Finding] = {}
+    dup_map: dict[str, str] = {}
     if clients and merged:
         orch = clients[orch_name]
         if os.getenv("REQAUDIT_ORCH_EFFORT"):
@@ -306,6 +307,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
             log(f"оркестратор: {orch.label}")
             data = orch.chat_json(prompts.ORCH_SYSTEM, prompts.orch_user(payload, doc.numbered_text()), max_tokens=32000)
             dup = set()
+            dup_map: dict[str, str] = {}
             for item in data.get("findings") or []:
                 fid = str(item.get("id") or "")
                 f = ids.get(fid)
@@ -323,6 +325,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
                         if (q.line_start, normalize(q.text)) not in seen and len(tgt.quotes) < 5:
                             tgt.quotes.append(q)
                     dup.add(fid)
+                    dup_map[fid] = d_of
                     continue
                 _apply_orch(f, item)
             result.priority = [str(x) for x in (data.get("priority") or []) if str(x) in ids and str(x) not in dup]
@@ -388,20 +391,27 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
     alive = {id(f) for f in merged}
     result.priority = [f.fid for f in prio_objs if id(f) in alive]
     for c in result.checklist:
-        c["why"] = _remap_ids(str(c.get("why", "")), alive, ids)
+        c["why"] = _remap_ids(str(c.get("why", "")), alive, ids, dup_map)
     stats.seconds = time.time() - t0
     log(f"готово: {len(merged)} находок, вызовов LLM: {stats.llm_calls} (кэш: {stats.llm_cached}), {stats.seconds:.0f} с")
     return result
 
 
-def _remap_ids(text: str, alive: set[int], ids: dict[str, Finding]) -> str:
+def _remap_ids(text: str, alive: set[int], ids: dict[str, Finding], dup_map: dict[str, str]) -> str:
     import re
 
     def repl(m):
-        f = ids.get(m.group(0))
-        return f.fid if f is not None and id(f) in alive else m.group(0)
+        cid = m.group(0)
+        seen = set()
+        while cid in dup_map and cid not in seen:  # дубль → основная находка
+            seen.add(cid)
+            cid = dup_map[cid]
+        f = ids.get(cid)
+        return f.fid if f is not None and id(f) in alive else ""
 
-    return re.sub(r"C-\d{2}", repl, text)
+    out = re.sub(r"C-\d{2,3}", repl, text)
+    out = re.sub(r"(,\s*){2,}", ", ", out)
+    return re.sub(r"^[,:\s]+|(?<=:)\s*,|,\s*(?=:)", "", out).strip()
 
 
 def _apply_orch(f: Finding, item: dict) -> None:
