@@ -156,6 +156,12 @@ def render(result: RunResult, out_path: Path) -> str:
              f"существенных {sev.get('major', 0)}, незначительных {sev.get('minor', 0)}.")
     if v["fix_first"]:
         L.append("- Исправить в первую очередь: " + "; ".join(f"{f.fid} — {f.title}" for f in v["fix_first"][:3]) + ".")
+    top_q = [f for fid in result.priority for f in findings if f.fid == fid and f.question][:3] or \
+        sorted([f for f in findings if f.question], key=lambda f: SEVERITY_ORDER[f.severity])[:3]
+    if top_q:
+        L.append("- Главные вопросы автору:")
+        for f in top_q:
+            L.append(f"  - {f.question.text} ({f.fid})")
     L.append("")
 
     # 2. нарезка
