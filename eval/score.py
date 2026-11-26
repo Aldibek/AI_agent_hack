@@ -95,11 +95,11 @@ def main(report_path: str, gold_path: str) -> None:
         print(f"  ✗ {item['id']} {item['title']} → {', '.join(hits)}")
     print(f"Всего находок в отчёте: {len(findings)}")
     n_strict = len(strict)
-    used = set(strict.values())
+    used = {f["fid"] for f in findings if any(matches(d, f) for d in gold["defects"])}
     print(f"\nСтрого (одна находка закрывает не больше одного дефекта): {n_strict} из {total} "
           f"({100 * n_strict / total:.0f}%)")
-    print(f"  находок, совпавших с эталоном: {len(used)} из {len(findings)}; остальные {len(findings) - len(used)} "
-          "— вне эталона (новые дефекты или шум, нужен ручной просмотр)")
+    print(f"  находок, совпавших хотя бы с одним дефектом эталона: {len(used)} из {len(findings)}; "
+          f"остальные {len(findings) - len(used)} — вне эталона (новые дефекты или шум, нужен ручной просмотр)")
     sev_ok = [item for item, hits in found if item["sev"] == "B"
               and any(f["severity"] == "blocker" for f in findings if f["fid"] in hits)]
     n_b = sum(1 for item in gold["defects"] if item["sev"] == "B")
