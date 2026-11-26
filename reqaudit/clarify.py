@@ -1,0 +1,115 @@
+"""Человек в контуре: ответы на уточняющие вопросы → перепроверка → исправленные формулировки (ТЗ v2).
+
+Режимы:
+- --interactive: агент задаёт главные вопросы в терминале;
+- --answers file: ответы берутся из файла (JSON {"F-01": "ответ"} или строки «F-01: ответ»), прогон повторяем.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+from . import prompts
+from .criteria import SEVERITY_ORDER
+from .llm import LLMError, available_clients
+from .models import Finding
+from .pipeline import RunResult, log
+
+
+def _ordered_questions(result: RunResult) -> list[Finding]:
+    with_q = [f for f in result.findings if f.question]
+    prio = [f for fid in result.priority for f in with_q if f.fid == fid]
+    rest = sorted([f for f in with_q if f not in prio], key=lambda f: (SEVERITY_ORDER[f.severity], f.fid))
+    return prio + rest
+
+
+def _load_answers(path: str) -> dict[str, str]:
+    text = Path(path).expanduser().read_text(encoding="utf-8")
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return {str(k).strip(): str(v).strip() for k, v in data.items() if str(v).strip()}
+    except json.JSONDecodeError:
+        pass
+    out = {}
+    for line in text.splitlines():
+        m = re.match(r"^\s*([FВB]-?\d+)\s*[:=]\s*(.+)$", line)
+        if m:
+            out[m.group(1).replace("В", "F").replace("B", "F")] = m.group(2).strip().strip('"')
+    return out
+
+
+def _ask(findings: list[Finding], n: int) -> dict[str, str]:
+    answers: dict[str, str] = {}
+    print("\n=== Уточняющие вопросы (Enter — пропустить, номер — выбрать вариант, или свой ответ) ===", file=sys.stderr)
+    for f in findings[:n]:
+        q = f.question
+        print(f"\n[{f.fid}] {f.title}\nВопрос{(' (' + q.addressee + ')') if q.addressee else ''}: {q.text}", file=sys.stderr)
+        for i, o in enumerate(q.options, start=1):
+            print(f"  {i}) {o}", file=sys.stderr)
+        try:
+            a = input("> ").strip()
+        except EOFError:
+            break
+        if not a:
+            continue
+        if a.isdigit() and 1 <= int(a) <= len(q.options):
+            a = q.options[int(a) - 1]
+        answers[f.fid] = a
+    return answers
+
+
+def apply_answers(result: RunResult, *, interactive: bool, answers_path: str | None, cache_dir: Path | None) -> None:
+    questions = _ordered_questions(result)
+    if not questions:
+        return
+    answers: dict[str, str] = {}
+    if answers_path:
+        answers.update(_load_answers(answers_path))
+    if interactive:
+        if sys.stdin.isatty():
+            answers.update(_ask([f for f in questions if f.fid not in answers], int(os.getenv("REQAUDIT_QUESTIONS", "5"))))
+            Path("answers.json").write_text(json.dumps(answers, ensure_ascii=False, indent=1), encoding="utf-8")
+            log("ответы сохранены в answers.json (для повторного прогона: --answers answers.json)")
+        else:
+            log("нет интерактивного терминала — вопросы только в отчёте")
+    by_id = {f.fid: f for f in result.findings}
+    answers = {k: v for k, v in answers.items() if k in by_id}
+    if not answers:
+        return
+    items = [{"id": fid, "title": by_id[fid].title, "explanation": by_id[fid].explanation[:500],
+              "quotes": [{"line": q.line_start, "text": q.text} for q in by_id[fid].quotes],
+              "question": by_id[fid].question.text if by_id[fid].question else "", "answer": a}
+             for fid, a in answers.items()]
+    updates = {}
+    clients = available_clients(result.stats, cache_dir)
+    client = None
+    if result.orchestrator and result.orchestrator.name in clients:
+        client = clients[result.orchestrator.name]
+    elif clients:
+        client = next(iter(clients.values()))
+    if client:
+        try:
+            log(f"перепроверка по ответам: {client.label}")
+            data = client.chat_json(prompts.RECHECK_SYSTEM,
+                                    "Ответы автора (JSON):\n" + json.dumps(items, ensure_ascii=False) +
+                                    "\n\nДокумент:\n<<<DOCUMENT\n" + result.doc.numbered_text() + "\nDOCUMENT>>>",
+                                    max_tokens=6000)
+            updates = {str(u.get("id")): u for u in data.get("updates") or [] if isinstance(u, dict)}
+        except (LLMError, ValueError) as e:
+            result.failures.append(f"Перепроверка по ответам не выполнена: {str(e)[:200]}")
+    status_ru = {"resolved": "решение получено — исправить документ", "partial": "частично", "open": "остаётся открытым"}
+    for fid, a in answers.items():
+        u = updates.get(fid, {})
+        f = by_id[fid]
+        st = status_ru.get(str(u.get("status", "")).lower(), "ответ получен")
+        rewrite = str(u.get("rewrite") or "")
+        result.answers.append({"fid": fid, "question": f.question.text if f.question else "", "answer": a,
+                               "status": st, "rewrite": rewrite, "new_issue": str(u.get("new_issue") or "")})
+        f.status_note = (f.status_note + " " if f.status_note else "") + f"Ответ автора: «{a}» — {st}."
+        if rewrite:
+            f.suggestion = rewrite

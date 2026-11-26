@@ -1,0 +1,19 @@
+# секреты
+.env
+.env.*
+!.env.example
+
+# окружение и кэш
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.reqaudit_cache/
+answers.json
+
+# результаты прогонов (отчёт сдаётся отдельно)
+reports/
+*.egg-info/
+.DS_Store
+.idea/
+.vscode/
