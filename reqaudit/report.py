@@ -48,6 +48,33 @@ def _lines_str(f: Finding) -> str:
     return ("строка " if len(ls) == 1 else "строки ") + ", ".join(str(x) for x in ls)
 
 
+def _mode_line(result) -> str:
+    """Режим по фактически выполненным шагам (а не по плану)."""
+    if result.mode == "rules-only":
+        return "только детерминированные правила (LLM недоступна)"
+    st = result.steps or {}
+    why = {"budget": "бюджет", "error": "ошибка", "skipped": "пропущен"}
+    parts = ["правила"]
+    rev = st.get("reviewers")
+    parts.append(f"LLM-консилиум ({rev} проходов)" if rev else "LLM-консилиум")
+    o = st.get("orchestrator")
+    if o == "ok":
+        parts.append("оркестратор")
+    elif o:
+        parts.append(f"без оркестратора ({why.get(o, o)}; детерминированная склейка)")
+    j = st.get("judge")
+    if j == "ok":
+        parts.append("судья")
+    elif j:
+        parts.append(f"без судьи ({why.get(j, j)})")
+    a = st.get("answers")
+    if a == "ok":
+        parts.append("перепроверка по ответам")
+    elif a:
+        parts.append(f"без перепроверки по ответам ({why.get(a, a)})")
+    return " + ".join(parts)
+
+
 def _rid_label(rid: str, by_id: dict[str, Requirement]) -> str:
     r = by_id.get(rid)
     if not r:
@@ -142,8 +169,7 @@ def render(result: RunResult, out_path: Path) -> str:
     if result.judge:
         ind = "независимый, не участвовал в ревью" if result.judge_independent else "участвовал в ревью (независимого судьи нет)"
         L.append(f"| Судья | {result.judge.company} — `{result.judge.model}` ({ind}) |")
-    mode = {"full": "полный (правила + LLM-консилиум + судья)", "rules-only": "только детерминированные правила (LLM недоступна)"}
-    L.append(f"| Режим | {mode.get(result.mode, result.mode)} |")
+    L.append(f"| Режим | {_mode_line(result)} |")
     s = result.stats
     L.append(f"| Вызовы LLM | {s.llm_calls} (из кэша: {s.llm_cached}, ошибок: {s.llm_failed}); токены: {s.prompt_tokens} → {s.completion_tokens} |")
     if result.mode != "rules-only" or result.costs:
@@ -337,7 +363,7 @@ def render(result: RunResult, out_path: Path) -> str:
     for e in result.failures:
         L.append(f"- ⚠️ {e}")
     for e in result.stats.events:
-        if e not in result.failures and e != result.budget_stop:
+        if e != result.budget_stop and not any(e in x for x in result.failures):
             L.append(f"- ℹ️ {e}")
     if result.mode == "rules-only":
         L.append("- ⚠️ LLM-анализ не выполнялся: смысловые противоречия и пропуски проверены только правилами. "

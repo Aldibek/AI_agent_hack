@@ -66,7 +66,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 def run_budget() -> float:
-    return _env_float("REQAUDIT_BUDGET_USD", 3.0)
+    return _env_float("REQAUDIT_BUDGET_USD", 2.0)
 
 
 def daily_budget() -> float:
@@ -136,7 +136,8 @@ class CostTracker:
         self._lock = threading.Lock()
         self.calls: list[dict] = []
         self.reserved = 0.0
-        self.exhausted: str = ""  # текст причины остановки
+        self.exhausted: str = ""  # причина полной остановки (дневной лимит)
+        self.blocked: list[str] = []  # вызовы, не поместившиеся в бюджет прогона
         self._warned: set[str] = set()
         history = read_ledger(self.path)
         today = datetime.now().strftime("%Y-%m-%d")
@@ -195,15 +196,16 @@ class CostTracker:
         est = self.estimate(model, role, input_chars) or 0.0
         with self._lock:
             if self.exhausted:
-                raise BudgetExceeded(self.exhausted, limit_usd=self.run_limit)
+                raise BudgetExceeded(self.exhausted, limit_usd=self.daily_limit, kind="daily")
             run_after = self.run_spent + self.reserved + est
             day_after = self.daily_spent + self.reserved + est
             if self.run_limit >= 0 and run_after > self.run_limit:
-                self.exhausted = (f"Прогон остановлен: исчерпан бюджет {fmt_usd(self.run_limit)} на прогон "
-                                  f"(потрачено {fmt_usd(self.run_spent)}, оценка следующего вызова ({role}, {model}) "
-                                  f"{fmt_usd(est)}).")
-                self._event(self.exhausted)
-                raise BudgetExceeded(self.exhausted, limit_usd=self.run_limit, kind="run")
+                # блокируем только этот вызов: следующие шаги выполнятся, если помещаются в остаток
+                msg = (f"Вызов {role} ({model}) пропущен: не помещается в бюджет {fmt_usd(self.run_limit)} на прогон "
+                       f"(потрачено {fmt_usd(self.run_spent)}, оценка вызова {fmt_usd(est)}).")
+                self.blocked.append(msg)
+                self._event(msg)
+                raise BudgetExceeded(msg, limit_usd=self.run_limit, kind="run")
             if self.daily_limit >= 0 and day_after > self.daily_limit:
                 self.exhausted = (f"Прогон остановлен: исчерпан бюджет {fmt_usd(self.daily_limit)} за сутки "
                                   f"(потрачено сегодня {fmt_usd(self.daily_spent)}, оценка следующего вызова "
@@ -289,6 +291,7 @@ class CostTracker:
             "budget_daily_usd": self.daily_limit,
             "daily_spent_usd": round(self.daily_spent, 6),
             "stopped": self.exhausted,
+            "blocked": list(self.blocked),
             "by_model": group("model"),
             "by_role": group("role"),
             "ledger": str(self.path),

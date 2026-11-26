@@ -70,7 +70,7 @@ class FakeSDK:
 
 ENV_KEYS = [PROVIDERS[n][1] for n in PROVIDERS if PROVIDERS[n][1]] + [
     "OLLAMA_BASE_URL", "OLLAMA_MODEL", "REQAUDIT_REVIEWERS", "REQAUDIT_JUDGE", "REQAUDIT_ORCHESTRATOR",
-    "REQAUDIT_JUDGE_MODEL", "REQAUDIT_VARIANTS", "ANTHROPIC_FOCUS", "ANTHROPIC_EFFORT", "ANTHROPIC_MODEL",
+    "REQAUDIT_JUDGE_MODEL", "REQAUDIT_ORCH_MODEL", "REQAUDIT_VARIANTS", "ANTHROPIC_FOCUS", "ANTHROPIC_EFFORT", "ANTHROPIC_MODEL",
     "REQAUDIT_ORCH_EFFORT", "REQAUDIT_JUDGE_EFFORT", "REQAUDIT_PRICES_FILE", "ANTHROPIC_FALLBACK",
     "ANTHROPIC_BASE_URL"]
 
@@ -214,9 +214,33 @@ class BudgetTest(CostsBase):
         self.assertIsInstance(cm.exception, LLMError)
         self.assertEqual(cm.exception.kind, "run")
         self.assertEqual(sdk.requests, [])  # вызов не сделан
-        self.assertTrue(tr.exhausted.startswith("Прогон остановлен: исчерпан бюджет $0.01"))
-        with self.assertRaises(BudgetExceeded):  # дальнейшие вызовы тоже блокируются
-            c.chat([{"role": "user", "content": "x"}], role="judge")
+        self.assertEqual(tr.exhausted, "")  # прогон не остановлен целиком — заблокирован только этот вызов
+        self.assertTrue(tr.blocked and "не помещается в бюджет $0.01" in tr.blocked[0])
+
+    def test_blocked_expensive_call_does_not_stop_cheap_one(self):
+        # дорогой оркестратор Opus не помещается, дешёвый судья Sonnet — помещается и выполняется
+        with mock.patch.dict(os.environ, {"REQAUDIT_BUDGET_USD": "0.10"}):
+            tr = self.tracker()
+        sdk = FakeSDK()
+        opus = self.client(sdk, tracker=tr)
+        with self.assertRaises(BudgetExceeded):
+            opus.chat([{"role": "user", "content": "x" * 35_000}], role="orchestrator")
+        sonnet = self.client(sdk, tracker=tr, model="claude-sonnet-5-5")
+        sonnet.chat([{"role": "user", "content": "x" * 1000}], role="judge")
+        self.assertEqual(len(sdk.requests), 1)
+        self.assertEqual(sdk.requests[0]["model"], "claude-sonnet-5-5")
+        self.assertEqual(tr.exhausted, "")
+
+    def test_daily_limit_stops_everything(self):
+        with mock.patch.dict(os.environ, {"REQAUDIT_DAILY_BUDGET_USD": "0.01"}):
+            tr = self.tracker()
+        with self.assertRaises(BudgetExceeded) as cm:
+            tr.check("claude-opus-5-5", "reviewer", 3500)
+        self.assertEqual(cm.exception.kind, "daily")
+        self.assertTrue(tr.exhausted)
+        with self.assertRaises(BudgetExceeded) as cm2:  # после дневного лимита блокируется всё, даже дешёвое
+            tr.check("claude-haiku-5-5", "judge", 10)
+        self.assertEqual(cm2.exception.kind, "daily")
 
     def test_run_budget_counts_spent(self):
         with mock.patch.dict(os.environ, {"REQAUDIT_BUDGET_USD": "1.0"}):
@@ -468,10 +492,50 @@ class PipelineCostsTest(CostsBase):
         self.assertEqual(code, 3)
         self.assertEqual(self.sdk.requests, [])  # ни один вызов не прошёл проверку бюджета
         text = out.read_text(encoding="utf-8")
-        self.assertIn("Прогон остановлен: исчерпан бюджет $0.0001", text)
+        self.assertIn("не помещается в бюджет $0.0001", text)
+        self.assertIn("без судьи (бюджет)", text)  # режим в паспорте — по фактически выполненным шагам
+        self.assertNotIn("правила + LLM-консилиум + судья", text)
         data = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))
         self.assertIn("costs", data)
-        self.assertTrue(data["budget_stop"])
+        self.assertTrue(data["budget_blocked"])
+        self.assertEqual(data["budget_stop"], "")
+
+    def test_orchestrator_model_override(self):
+        from reqaudit.pipeline import run
+        from reqaudit.report import render
+
+        with mock.patch.dict(os.environ, {"REQAUDIT_ORCH_MODEL": "claude-sonnet-5-5"}):
+            result = run(str(self.spec), use_llm=True, cache_dir=None)
+        models = [r["model"] for r in self.sdk.requests]
+        self.assertEqual(models.count("claude-opus-5-5"), 3)  # только ревьюеры
+        self.assertEqual(models[-2:], ["claude-sonnet-5-5", "claude-sonnet-5-5"])  # оркестратор + судья
+        self.assertEqual(result.orchestrator.model, "claude-sonnet-5-5")
+        text = render(result, Path(self.tmp.name) / "r.md")
+        self.assertIn("| Режим | правила + LLM-консилиум (3/3 проходов) + оркестратор + судья |", text)
+
+
+class JsonRepairTest(unittest.TestCase):
+    def test_parse_broken_json_locally(self):
+        from reqaudit.llm import parse_json, repair_json
+
+        broken = '{"findings": [{"title": "Поле "сумма" не описано", "lines": [1, 2,],},], "priority": ["C-01"]}'
+        with self.assertRaises(ValueError):
+            parse_json(broken)
+        fixed = repair_json(broken)
+        self.assertIsInstance(fixed, dict)
+        self.assertEqual(fixed["priority"], ["C-01"])
+        self.assertEqual(len(fixed["findings"]), 1)
+
+    def test_chat_json_repairs_without_second_call(self):
+        sdk = FakeSDK(text=lambda kw: '{"verdicts": [{"id": "F-01", "note": "см. "пример""}]}')
+        stats = RunStats()
+        c = AnthropicClient("anthropic", "Anthropic", "claude-sonnet-5-5", "k", stats, None, sdk=sdk)
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"REQAUDIT_FAILED_DIR": d}):
+            data = c.chat_json("sys", "user", role="judge")
+            self.assertEqual(len(list(Path(d).iterdir())), 1)  # сырой ответ сохранён
+        self.assertEqual(data["verdicts"][0]["id"], "F-01")
+        self.assertEqual(len(sdk.requests), 1)  # повторного платного вызова не было
+        self.assertTrue(any("исправлен локально" in e for e in stats.events))
 
 
 if __name__ == "__main__":

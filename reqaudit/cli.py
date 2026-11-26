@@ -74,6 +74,9 @@ def main(argv: list[str] | None = None) -> int:
     if result.budget_stop:
         print(f"Внимание: {result.budget_stop} Отчёт построен по выполненным шагам.", file=sys.stderr)
         return 3
+    if result.budget_blocked:
+        print("Внимание: часть шагов пропущена по бюджету прогона: " + "; ".join(result.budget_blocked), file=sys.stderr)
+        return 3
     return 0
 
 

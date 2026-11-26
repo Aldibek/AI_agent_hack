@@ -52,6 +52,8 @@ class RunResult(BaseModel):
     answers: list[dict] = Field(default_factory=list)
     costs: dict = Field(default_factory=dict)  # учёт расходов (reqaudit.costs.CostTracker.summary)
     budget_stop: str = ""  # причина остановки по бюджету (пусто — бюджет не исчерпан)
+    budget_blocked: list[str] = Field(default_factory=list)  # отдельные вызовы, не поместившиеся в бюджет прогона
+    steps: dict[str, str] = Field(default_factory=dict)  # шаг → ok | budget | error | skipped (для честного «Режима»)
 
 
 def log(msg: str) -> None:
@@ -215,6 +217,10 @@ def pick_roles(clients: dict):
     orch = orch_env if orch_env in clients else (reviewers[0] if reviewers else None)
     if judge and judge == orch and len(reviewers) > 1 and not judge_env and not spare:
         judge = reviewers[1]
+    om = os.getenv("REQAUDIT_ORCH_MODEL", "").strip()
+    if orch and om and om != clients[orch].model:
+        clients["orchestrator"] = clients[orch].clone(om)  # оркестратор — своя модель (по умолчанию Sonnet 5.5)
+        orch = "orchestrator"
     jm = os.getenv("REQAUDIT_JUDGE_MODEL", "").strip()
     if judge and jm and jm != clients[judge].model:
         clients["judge"] = clients[judge].clone(jm)  # работает для любого провайдера (anthropic, openai, ...)
@@ -223,8 +229,14 @@ def pick_roles(clients: dict):
 
 
 def _budget_stopped(result: RunResult, e: BudgetExceeded, step: str) -> None:
-    if not result.budget_stop:
-        result.budget_stop = str(e)
+    if getattr(e, "kind", "run") == "daily":
+        if not result.budget_stop:
+            result.budget_stop = str(e)  # дневной лимит — дальше ничего не вызываем
+    else:
+        result.budget_blocked.append(f"{step}: {e}")  # пропущен только этот шаг
+    key = {"Оркестратор": "orchestrator", "Судья": "judge"}.get(step)
+    if key:
+        result.steps[key] = "budget"
     result.failures.append(f"{step} не выполнен: {e}")
     log(f"  {step}: {e}")
 
@@ -328,6 +340,9 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
                 except (LLMError, ValueError) as e:
                     result.failures.append(f"Ревьюер {t[2]} недоступен: {str(e)[:200]}")
                     log(f"  ревьюер {t[2]} упал: {str(e)[:160]}")
+        ok_rev = len(tasks) - sum(1 for x in result.failures if x.startswith("Ревьюер ")) \
+            - sum(1 for x in result.budget_blocked if x.startswith("Ревьюер "))
+        result.steps["reviewers"] = f"{max(ok_rev, 0)}/{len(tasks)}"
         log(f"проверка цитат: подтверждено {len(all_findings)}, отброшено {len(result.dropped_ungrounded)}")
 
     merged = merge_findings(all_findings)
@@ -344,6 +359,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
     dup_map: dict[str, str] = {}
     if clients and merged and tracker.exhausted:
         result.failures.append("Оркестратор пропущен: исчерпан бюджет — применена детерминированная склейка.")
+        result.steps["orchestrator"] = "budget"
         prio_objs = []
     elif clients and merged:
         orch = clients[orch_name]
@@ -384,10 +400,12 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
             result.readiness = {str(k): str(v) for k, v in rd.items() if v} if isinstance(rd, dict) else {}
             merged = [f for k, f in ids.items() if k not in dup]
             prio_objs = [ids[k] for k in result.priority]
+            result.steps["orchestrator"] = "ok"
         except BudgetExceeded as e:
             _budget_stopped(result, e, "Оркестратор")
             prio_objs = []
         except (LLMError, ValueError) as e:
+            result.steps["orchestrator"] = "error"
             result.failures.append(f"Оркестратор недоступен: {str(e)[:200]} — применена детерминированная склейка.")
             log(f"  оркестратор упал: {str(e)[:160]}")
             prio_objs = []
@@ -401,6 +419,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
     # ---------------------------------------------------------------- судья
     if clients and merged and tracker.exhausted:
         result.failures.append("Судья пропущен: исчерпан бюджет — находки не перепроверены.")
+        result.steps["judge"] = "budget"
     elif clients and merged:
         judge = clients[judge_name]
         if os.getenv("REQAUDIT_JUDGE_EFFORT"):
@@ -436,9 +455,11 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
                 else:
                     kept.append(f)
             merged = kept
+            result.steps["judge"] = "ok"
         except BudgetExceeded as e:
             _budget_stopped(result, e, "Судья")
         except (LLMError, ValueError) as e:
+            result.steps["judge"] = "error"
             result.failures.append(f"Судья недоступен: {str(e)[:200]} — находки не перепроверены.")
             log(f"  судья упал: {str(e)[:160]}")
 

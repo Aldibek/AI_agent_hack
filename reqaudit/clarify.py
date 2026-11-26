@@ -15,6 +15,7 @@ from pathlib import Path
 
 from . import costs, prompts
 from .criteria import SEVERITY_ORDER
+from .costs import BudgetExceeded
 from .llm import LLMError, available_clients
 from .models import Finding
 from .pipeline import RunResult, finalize_costs, log
@@ -91,6 +92,10 @@ def apply_answers(result: RunResult, *, interactive: bool, answers_path: str | N
     client = None
     if result.orchestrator and result.orchestrator.name in clients:
         client = clients[result.orchestrator.name]
+        if result.orchestrator.model and result.orchestrator.model != client.model:
+            client = client.clone(result.orchestrator.model)  # та же модель, что у оркестратора
+        if os.getenv("REQAUDIT_ORCH_EFFORT"):
+            client.reasoning_effort = os.environ["REQAUDIT_ORCH_EFFORT"]
     elif clients:
         client = next(iter(clients.values()))
     if client:
@@ -101,7 +106,13 @@ def apply_answers(result: RunResult, *, interactive: bool, answers_path: str | N
                                     "\n\nДокумент:\n<<<DOCUMENT\n" + result.doc.numbered_text() + "\nDOCUMENT>>>",
                                     max_tokens=6000, role="clarify")
             updates = {str(u.get("id")): u for u in data.get("updates") or [] if isinstance(u, dict)}
+            result.steps["answers"] = "ok"
+        except BudgetExceeded as e:
+            result.steps["answers"] = "budget"
+            result.budget_blocked.append(f"Перепроверка по ответам: {e}")
+            result.failures.append(f"Перепроверка по ответам не выполнена: {str(e)[:200]}")
         except (LLMError, ValueError) as e:
+            result.steps["answers"] = "error"
             result.failures.append(f"Перепроверка по ответам не выполнена: {str(e)[:200]}")
         finalize_costs(result, tracker)
     status_ru = {"resolved": "решение получено — исправить документ", "partial": "частично", "open": "остаётся открытым"}

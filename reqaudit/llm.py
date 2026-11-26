@@ -219,7 +219,12 @@ def _chat_json(client, system: str, user: str, temperature: float, max_tokens: i
     try:
         return parse_json(content)
     except ValueError:
-        pass
+        _save_raw(client, role, content)
+    if not meta.get("truncated"):
+        repaired = repair_json(content)
+        if repaired is not None:  # мелкая порча (кавычка, запятая) — чиним локально, без нового платного вызова
+            _event(client, f"{client.label} ({role}): JSON ответа исправлен локально (json-repair), повтор не нужен")
+            return repaired
     if meta.get("truncated"):
         used = int(meta.get("max_tokens") or max_tokens or ANTHROPIC_MAX_TOKENS)
         if used >= ANTHROPIC_MAX_TOKENS:
@@ -237,6 +242,44 @@ def _chat_json(client, system: str, user: str, temperature: float, max_tokens: i
                  {"role": "user", "content": "Ответ не является валидным JSON. Верни тот же ответ строго одним JSON-объектом, без пояснений и markdown."}]
     content = client.chat(messages, temperature=0.0, max_tokens=max_tokens, role=role)
     return parse_json(content)
+
+
+def repair_json(text: str) -> dict | None:
+    """Последняя попытка разобрать почти-JSON (неэкранированные кавычки, висячие запятые и т.п.)."""
+    try:
+        import json_repair
+    except ImportError:
+        return None
+    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", (text or "").strip(), flags=re.S)
+    start = t.find("{")
+    if start < 0:
+        return None
+    try:
+        v = json_repair.loads(t[start:])
+    except Exception:  # noqa: BLE001 — библиотека может бросить что угодно на мусоре
+        return None
+    return v if isinstance(v, dict) and v else None
+
+
+def _event(client, msg: str) -> None:
+    stats = getattr(client, "stats", None)
+    if stats is not None:
+        with client._lock:
+            stats.events.append(msg)
+
+
+def _save_raw(client, role: str, content: str) -> None:
+    """Сохранить сырой ответ, который не разобрался как JSON, — для разбора причин."""
+    try:
+        tracker = getattr(client, "tracker", None)
+        run_id = getattr(tracker, "run_id", "") or time.strftime("%Y%m%d-%H%M%S")
+        d = Path(os.getenv("REQAUDIT_FAILED_DIR", ".reqaudit_failed"))
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"{run_id}_{role}_{re.sub(r'[^A-Za-z0-9_.-]', '_', client.label)}_{int(time.time() * 1000) % 100000}.txt"
+        path.write_text(content or "", encoding="utf-8")
+        _event(client, f"{client.label} ({role}): невалидный JSON, сырой ответ сохранён в {path}")
+    except OSError:
+        pass
 
 
 def _chars(messages: list[dict]) -> int:
