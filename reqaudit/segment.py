@@ -15,10 +15,11 @@ from .models import Document, Requirement
 SECTION_KINDS: list[tuple[str, str | None]] = [
     (r"нефункциональ|non[- ]?functional", "NFR"),
     (r"функциональн|functional req", "FR"),
-    (r"критери\w*\s+при[её]мк|acceptance", "AC"),
+    (r"критери\w*\s+при[её]мк|сценари\w*\s+при[её]мк|при[её]мочн|acceptance|тест-кейс|тестов\w+ сценари", "AC"),
+    (r"бизнес-требован|business req", "BR"),
     (r"требования к данным|модель данных|\bdata\b", "DATA"),
     (r"интеграц|integration", "INT"),
-    (r"^цел[ьи]\b|\bgoals?\b|бизнес-цел", "GOAL"),
+    (r"^цел[ьи]\b|\bgoals?\b|бизнес-цел|назначени|^\d+[.)]?\s*цел[ьи]\b|\bpurpose\b", "GOAL"),
     (r"дизайн|интерфейс|\bui\b|\bux\b|экран", "UI"),
     (r"архитектур", "ARCH"),
     (r"bpmn|схема процесса|бизнес-процесс", "PROC"),
@@ -30,12 +31,12 @@ SECTION_KINDS: list[tuple[str, str | None]] = [
     (r"логика|особые правила|параметр|query|path|request|ответ|статус|response|общие параметры"
      r"|rest|\bapi\b|метод|endpoint|схема", "API"),
 ]
-REQ_KINDS = {"FR", "NFR", "AC", "DATA", "INT", "GOAL", "UI", "ARCH", "PROC", "SEQ", "API"}
+REQ_KINDS = {"FR", "NFR", "AC", "DATA", "INT", "GOAL", "BR", "UI", "ARCH", "PROC", "SEQ", "API"}
 NON_REQ_KINDS = {"META", "REVIEW", "APPROVAL", "TEST"}
 
 KIND_RU = {
     "FR": "функциональное", "NFR": "нефункциональное", "AC": "критерий приёмки", "DATA": "данные",
-    "INT": "интеграция", "GOAL": "цель", "UI": "интерфейс", "ARCH": "архитектура", "PROC": "процесс",
+    "INT": "интеграция", "GOAL": "цель", "BR": "бизнес-требование", "UI": "интерфейс", "ARCH": "архитектура", "PROC": "процесс",
     "SEQ": "взаимодействие", "API": "API", "REQ": "требование",
 }
 

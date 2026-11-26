@@ -41,7 +41,7 @@ WEAK_WORDS: list[tuple[str, str]] = [
     (r"и т\.\s?д\.", "открытый список «и т.д.»"), (r"и др\.", "открытый список «и др.»"),
     (r"и далее\b", "открытый список «и далее»"), (r"и/или", "двусмысленное «и/или»"),
     (r"по усмотрению", "«по усмотрению» — неясно чьему"), (r"в разумные сроки", "«в разумные сроки» без числа"),
-    (r"максимально\b", "«максимально» без числа"), (r"user[- ]friendly", "субъективное user-friendly"),
+    (r"максимально\b", "«максимально» без числа"), (r"высок\w+ нагрузк\w*", "«высокая нагрузка» без числа"), (r"user[- ]friendly", "субъективное user-friendly"),
     (r"\betc\b", "открытый список etc."), (r"as appropriate", "лазейка as appropriate"),
     (r"if possible", "лазейка if possible"), (r"\bquickly\b|\bfast\b", "«fast» без числа"),
 ]
@@ -180,15 +180,15 @@ def rule_weak_words(doc: Document, reqs: list[Requirement]) -> list[Finding]:
         hits.sort(key=lambda h: h[1].start())
         quotes, hints, seen = [], [], set()
         for n, m, hint, line in hits:
+            hints.append(hint)
             frag = _sentence(line, m.start(), m.end())
             if frag in seen:
                 continue
             seen.add(frag)
             quotes.append(Quote(text=frag, line=n))
-            hints.append(hint)
         timing = any(TIME_WORDS.search(m.group(0).lower()) for _, m, _, _ in hits)
         category = "unverifiable" if timing else "ambiguity"
-        sev = "major" if r.kind in {"FR", "NFR", "GOAL"} and timing else "minor"
+        sev = "major" if r.kind in {"FR", "NFR", "GOAL", "BR"} and timing else "minor"
         out.append(_f("weak_words", category, sev, "У", f"Размытая формулировка: {', '.join(dict.fromkeys(hints))}",
                       "Слово не задаёт измеримого критерия; разные читатели поймут его по-разному, а тест нельзя "
                       "однозначно признать пройденным (ISO 29148 §5.2.7 — избегать неопределённых терминов).",
@@ -241,11 +241,13 @@ def rule_status_codes(doc: Document, reqs: list[Requirement]) -> list[Finding]:
         return out
     head_re = re.compile(r"^\W*([1-5]\d\d)\b\.?\s*(?:Successful|Unsuccessful|Успешн\w*|Неуспешн\w*)?\s*[—–-]\s*([A-Za-z][A-Za-z ]+?)\s*$")
     described: dict[int, int] = {}
+    desc_re = re.compile(r"^\W*(?:ответ|код|статус|status|http)?\s*([1-5]\d\d)\b\s*(?:[.—–:-]|возвраща|returns?)", re.I)
     for ln in api_lines:
         s = _strip_md(ln.text)
-        m = re.match(r"^\W*([1-5]\d\d)\b", s)
-        if m and (ln.text.lstrip().startswith(("#", "**")) or re.match(r"^\d{3}\.", s)):
-            described.setdefault(int(m.group(1)), ln.n)
+        for sent in re.split(r"(?<=[.!?])\s+", s):
+            m = desc_re.match(sent)
+            if m:
+                described.setdefault(int(m.group(1)), ln.n)
         hm = head_re.match(s)
         if hm:
             code, reason = int(hm.group(1)), hm.group(2).strip().lower()
@@ -362,21 +364,26 @@ def rule_ac_arithmetic(doc: Document, reqs: list[Requirement]) -> tuple[list[Fin
         if r.kind != "AC":
             continue
         parts = {p.split(":", 1)[0].strip().lower(): p.split(":", 1)[1] for p in r.text.split("; ") if ":" in p}
-        pre = next((v for k, v in parts.items() if "исходн" in k or "услови" in k or "given" in k), "")
-        act = next((v for k, v in parts.items() if "действ" in k or "when" in k), "")
-        res = next((v for k, v in parts.items() if "ожида" in k or "результат" in k or "then" in k), "")
+        pre = next((v for k, v in parts.items() if "исходн" in k or "услови" in k or "given" in k or k == "дано"), "")
+        act = next((v for k, v in parts.items() if "действ" in k or "when" in k or k == "когда"), "")
+        res = next((v for k, v in parts.items() if "ожида" in k or "результат" in k or "then" in k or k == "тогда"), "")
         if not (pre and act and res):
             continue
-        pre_m = re.search(r"расход\w*\s+" + AMOUNT_RE.pattern, pre, re.I)
+        pre_m = re.search(r"(расход\w*|баланс\w*|остат\w*)\s+" + AMOUNT_RE.pattern, pre, re.I)
         act_m = AMOUNT_RE.search(act)
-        res_m = re.search(r"(?:итог|сумм\w*|расход\w*|счётчик\w*|счетчик\w*)[^\d]{0,25}" + AMOUNT_RE.pattern, res, re.I)
+        res_m = re.search(r"(?:итог|сумм\w*|расход\w*|счётчик\w*|счетчик\w*|баланс\w*|остат\w*)[^\d]{0,25}" + AMOUNT_RE.pattern, res, re.I)
         if not (pre_m and act_m and res_m):
             continue
-        a, b, c = _int(pre_m.group(1)), _int(act_m.group(1)), _int(res_m.group(1))
-        if re.search(r"покупк|оплат", act, re.I):
+        a, b, c = _int(pre_m.group(2)), _int(act_m.group(1)), _int(res_m.group(1))
+        spending = pre_m.group(1).lower().startswith("расход")
+        if spending and re.search(r"покупк|оплат", act, re.I):
             expected, op = a + b, "+"
-        elif re.search(r"возврат", act, re.I):
+        elif spending and re.search(r"возврат", act, re.I):
             expected, op = a - b, "−"
+        elif not spending and re.search(r"перев|списан|оплат|покупк|сняти", act, re.I):
+            expected, op = a - b, "−"
+        elif not spending and re.search(r"пополн|зачисл|возврат", act, re.I):
+            expected, op = a + b, "+"
         else:
             continue
         if expected == c:
@@ -432,11 +439,133 @@ def rule_traceability(doc: Document, reqs: list[Requirement]) -> list[Finding]:
     return []
 
 
+STOP = {"для", "при", "если", "или", "это", "который", "которая", "поле", "значение"}
+
+
+def _stems(text: str) -> list[str]:
+    words = re.findall(r"[a-zа-яё]{4,}", text.lower().replace("ё", "е"))
+    return [w[:5] for w in words if w not in STOP]
+
+
+def rule_data_model(doc: Document, reqs: list[Requirement]) -> list[Finding]:
+    """Поля, которые по API хранятся в БД, но отсутствуют в требованиях к данным."""
+    data = [r for r in reqs if r.kind == "DATA"]
+    if not data:
+        return []
+    data_stems = set(_stems(" ".join(r.text for r in data)))
+    missing = []
+    for start, header, rows in _table_blocks(doc):
+        h = [c.lower() for c in header]
+        db_i = next((i for i, c in enumerate(h) if re.search(r"db|поле бд|бд|столбец|column", c)), None)
+        desc_i = next((i for i, c in enumerate(h) if re.search(r"description|описание", c)), None)
+        name_i = 0
+        if db_i is None or desc_i is None:
+            continue
+        for n, cells in rows:
+            if len(cells) <= max(db_i, desc_i):
+                continue
+            db, desc = cells[db_i], cells[desc_i]
+            if not db or EMPTY_CELL_RE.match(db):
+                continue
+            stems = _stems(desc)
+            if stems and any(s not in data_stems for s in stems) and db not in [m[1] for m in missing]:
+                missing.append((n, db, desc, cells[name_i]))
+    if not missing:
+        return []
+    names = ", ".join(f"«{d}» (`{db}`)" for _, db, d, _ in missing)
+    return [_f("data_model", "incompleteness", "major", "У", f"Хранимые поля API отсутствуют в требованиях к данным: {names}",
+               "По описанию API эти значения сохраняются в БД, но перечень «Требования к данным» их не содержит — "
+               "модель данных в двух местах документа расходится.",
+               [_q(doc, n) for n, *_ in missing[:2]] + [_q(doc, data[0].line_start)],
+               suggestion="Дополнить требования к данным недостающими полями (тип, единица, обязательность) или убрать их из API.")]
+
+
+def rule_glossary(doc: Document, reqs: list[Requirement]) -> list[Finding]:
+    if sum(1 for r in reqs if r.kind == "FR") < 3:
+        return []
+    if any(re.search(r"глоссари|термины и определения|^#+\s*определения|glossary|definitions", ln.text, re.I) for ln in doc.lines):
+        return []
+    return [_f("glossary", "terminology", "minor", "У", "В документе нет глоссария терминов",
+               "Ключевые термины предметной области не определены; разные участники могут понимать их по-разному "
+               "(ISO 29148 §5.2.6 — понятность набора).",
+               [], suggestion="Добавить раздел «Термины и определения» для ключевых понятий бизнес-правил.",
+               search_scope="весь документ: раздел «Глоссарий / Термины и определения» не найден")]
+
+
+def rule_rollback(doc: Document, reqs: list[Requirement]) -> list[Finding]:
+    check = [ln for ln in doc.lines if section_kind(ln.section) == "REVIEW" and re.search(r"откат", ln.text, re.I)]
+    if not check:
+        return []
+    described = any(re.search(r"откат|rollback|feature[- ]?flag|фич[еа]-?флаг|скрыти\w* функционал", ln.text, re.I)
+                    for ln in doc.lines if section_kind(ln.section) != "REVIEW")
+    if described:
+        return []
+    return [_f("rollback", "incompleteness", "minor", "У", "Не описана схема отката или скрытия функционала",
+               "Чек-лист шаблона требует схему отката (или вариант скрытия функционала), но в требованиях она не описана.",
+               [_q(doc, check[0].n)], suggestion="Описать откат: флаг включения функции, поведение при выключении, судьба накопленных данных.",
+               search_scope="все разделы, кроме чек-листа: упоминаний отката/feature flag нет")]
+
+
+# Группы синонимов предметной области: разные имена одного понятия в одном документе — признак дрейфа терминов.
+TERM_GROUPS = [
+    ("порог/лимит", [("порог", r"порог\w*"), ("лимит", r"лимит\w*"), ("limit", r"(?i)limit"), ("бюджет", r"бюджет\w*"),
+                     ("threshold", r"(?i)threshold"), ("budget", r"(?i)budget")]),
+    ("баланс/остаток", [("баланс", r"баланс\w*"), ("остаток", r"остат(?:о|к)\w*"), ("balance", r"(?i)balance")]),
+    ("комиссия/плата", [("комиссия", r"комисси\w*"), ("плата за", r"плат[аы] за"), ("fee", r"(?i)\bfee")]),
+]
+
+
+def rule_term_drift(doc: Document, reqs: list[Requirement]) -> list[Finding]:
+    out = []
+    for concept, variants in TERM_GROUPS:
+        seen: list[tuple[str, int]] = []
+        for name, pattern in variants:
+            for ln in doc.lines:
+                if section_kind(ln.section) in {"META", "REVIEW", "APPROVAL"}:
+                    continue
+                if re.search(pattern, ln.text, 0 if pattern.startswith("(?i)") else re.I):
+                    seen.append((name, ln.n))
+                    break
+        names = {n for n, _ in seen}
+        sections = {doc.lines[line - 1].section for _, line in seen}
+        # английский идентификатор и русский термин одного корня (limit/лимит) — не дрейф
+        if names >= {"limit", "лимит"} and len(names) == 2:
+            continue
+        if len(names) >= 2 and len(sections) >= 2:
+            variants_str = ", ".join(f"«{n}» (строка {line})" for n, line in seen)
+            out.append(_f("term_drift", "terminology", "minor", "У", f"Одно понятие ({concept}) названо по-разному",
+                          f"В документе встречаются разные имена одного понятия: {variants_str}. Читатель не может быть уверен, "
+                          "что это одно и то же; имена полей и методов API расходятся с бизнес-терминами.",
+                          [_q(doc, line) for _, line in seen[:4]],
+                          suggestion="Выбрать один термин, закрепить его в глоссарии и использовать в ФТ, UI, API и данных; "
+                                     "либо явно указать соответствие (например, поле API = термин ФТ)."))
+    return out
+
+
+def rule_card_data(doc: Document, reqs: list[Requirement]) -> list[Finding]:
+    hits = [r for r in reqs if re.search(r"цифр\w* карты|номер\w* карты|\bPAN\b|cardId|card_id|номер карт", r.text, re.I)]
+    if not hits:
+        return []
+    text = " ".join(ln.text for ln in doc.lines)
+    if re.search(r"маскир|PCI|токениз|персональн\w* данн|шифр", text, re.I):
+        return []
+    return [_f("card_data", "security", "major", "У", "Не определены требования к защите карточных данных",
+               "Документ передаёт и хранит идентификаторы и цифры карты, но не определяет, что это за идентификатор "
+               "(PAN или токен), как данные маскируются в push и логах и какие требования PCI DSS и закона о персональных "
+               "данных применяются.",
+               [_q(doc, r.line_start) for r in hits[:2]],
+               suggestion="Указать: cardId — токен, а не PAN; в push только маска «•• 1234»; номер карты и суммы не пишутся в логи и URL.",
+               question=Question(text="Что такое идентификатор карты в API и событиях — номер карты (PAN) или токен?",
+                                 options=["Токен карты", "Маскированный PAN", "Полный PAN (тогда нужен контур PCI DSS)"],
+                                 addressee="ИБ"))]
+
+
 def run_rules(doc: Document, reqs: list[Requirement]) -> tuple[list[Finding], list[str]]:
     findings: list[Finding] = []
     notes: list[str] = []
     for rule in (rule_placeholders, rule_checklist_and_empty_tables, rule_weak_words, rule_http, rule_status_codes,
-                 rule_units, rule_timezone, rule_boundaries, rule_version, rule_traceability):
+                 rule_units, rule_timezone, rule_boundaries, rule_version, rule_traceability, rule_data_model,
+                 rule_glossary, rule_rollback, rule_card_data, rule_term_drift):
         try:
             findings.extend(rule(doc, reqs))
         except Exception as e:  # правило не должно ронять прогон

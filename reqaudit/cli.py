@@ -58,7 +58,10 @@ def main(argv: list[str] | None = None) -> int:
     render(result, out)
     write_trace(result, out.with_suffix(".json"))
     write_source(result, out.with_suffix(".source.txt"))
-    print(f"Отчёт: {out}", file=sys.stderr)
+    from .report_html import render_html
+
+    render_html(result, out.with_suffix(".html"))
+    print(f"Отчёт: {out} (наглядная версия: {out.with_suffix('.html')})", file=sys.stderr)
     print(f"Трассировка: {out.with_suffix('.json')}; текст документа с номерами строк: {out.with_suffix('.source.txt')}",
           file=sys.stderr)
     return 0

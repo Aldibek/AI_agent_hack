@@ -210,6 +210,11 @@ def pick_roles(clients: dict[str, LLMClient]):
     orch = orch_env if orch_env in clients else (reviewers[0] if reviewers else None)
     if judge and judge == orch and len(reviewers) > 1 and not judge_env and not spare:
         judge = reviewers[1]
+    jm = os.getenv("REQAUDIT_JUDGE_MODEL", "").strip()
+    if judge and jm and jm != clients[judge].model:
+        base = clients[judge]
+        clients["judge"] = LLMClient(base.name, base.company, jm, base.url, base.api_key, base.stats, base.cache_dir)
+        judge = "judge"
     return reviewers, orch, judge
 
 
@@ -241,9 +246,14 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
         variants = int(os.getenv("REQAUDIT_VARIANTS", "2" if len(reviewers) == 1 else "1"))
         tasks = []
         for i, name in enumerate(reviewers):
-            for v in range(variants):
-                label = name if variants == 1 else f"{name}#{v + 1}"
-                tasks.append((clients[name], (i + v) % 3, label))
+            focus_env = os.getenv(f"{name.upper()}_FOCUS", "").strip()
+            if focus_env:
+                foci = [int(x) % 3 for x in focus_env.split(",") if x.strip().isdigit()]
+            else:
+                foci = [(i + v) % 3 for v in range(int(os.getenv(f"{name.upper()}_VARIANTS", variants)))]
+            for v, focus in enumerate(foci):
+                label = name if len(foci) == 1 else f"{name}#{v + 1}"
+                tasks.append((clients[name], focus, label))
         result.reviewers = [clients[n].info for n in reviewers]
         result.reviewer_labels = [t[2] for t in tasks]
         numbered = doc.numbered_text()
@@ -253,7 +263,9 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
         def review(task):
             client, variant, label = task
             started = time.time()
-            data = client.chat_json(prompts.reviewer_system(variant), user, max_tokens=16000)
+            cap = int(os.getenv(f"{client.name.upper()}_MAX_FINDINGS", "25"))
+            data = client.chat_json(prompts.reviewer_system(variant, cap), user, max_tokens=16000,
+                                    deadline=float(os.getenv("REQAUDIT_REVIEW_DEADLINE", "480")))
             fs = _to_findings(data, label)
             log(f"  ревьюер {label}: {len(fs)} находок за {time.time() - started:.0f} с")
             return fs
@@ -285,12 +297,14 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
     ids: dict[str, Finding] = {}
     if clients and merged:
         orch = clients[orch_name]
+        if os.getenv("REQAUDIT_ORCH_EFFORT"):
+            orch.reasoning_effort = os.environ["REQAUDIT_ORCH_EFFORT"]
         result.orchestrator = orch.info
         ids = {f"C-{i:02d}": f for i, f in enumerate(merged, start=1)}
         payload = json.dumps([_compact(f, k) for k, f in ids.items()], ensure_ascii=False)
         try:
             log(f"оркестратор: {orch.label}")
-            data = orch.chat_json(prompts.ORCH_SYSTEM, prompts.orch_user(payload, doc.numbered_text()), max_tokens=16000)
+            data = orch.chat_json(prompts.ORCH_SYSTEM, prompts.orch_user(payload, doc.numbered_text()), max_tokens=32000)
             dup = set()
             for item in data.get("findings") or []:
                 fid = str(item.get("id") or "")
@@ -331,12 +345,14 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
     # ---------------------------------------------------------------- судья
     if clients and merged:
         judge = clients[judge_name]
+        if os.getenv("REQAUDIT_JUDGE_EFFORT"):
+            judge.reasoning_effort = os.environ["REQAUDIT_JUDGE_EFFORT"]
         result.judge = judge.info
-        result.judge_independent = judge_name not in [r.name for r in result.reviewers]
+        result.judge_independent = judge.label not in [clients[n].label for n in reviewers]
         payload = json.dumps([_compact(f, f.fid) for f in merged if f.proof != "Ш"], ensure_ascii=False)
         try:
             log(f"судья: {judge.label}" + ("" if result.judge_independent else " (не независим: участвовал в ревью)"))
-            data = judge.chat_json(prompts.JUDGE_SYSTEM, prompts.judge_user(payload, doc.numbered_text()), max_tokens=8000)
+            data = judge.chat_json(prompts.JUDGE_SYSTEM, prompts.judge_user(payload, doc.numbered_text()), max_tokens=16000)
             by_id = {f.fid: f for f in merged}
             for v in data.get("verdicts") or []:
                 f = by_id.get(str(v.get("id") or ""))
