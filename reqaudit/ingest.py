@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from pathlib import Path
 
@@ -60,7 +61,9 @@ def _load_pdf(path: Path) -> tuple[list[Line], int, list[str]]:
         import pymupdf  # noqa: F401  (pymupdf4llm требует pymupdf)
         import pymupdf4llm
 
-        chunks = pymupdf4llm.to_markdown(str(path), page_chunks=True, show_progress=False)
+        # сканы распознаются Tesseract; языки — русский, казахский, английский (по умолчанию в библиотеке только eng)
+        chunks = pymupdf4llm.to_markdown(str(path), page_chunks=True, show_progress=False,
+                                         ocr_language=os.getenv("REQAUDIT_OCR_LANG", "rus+kaz+eng"))
     texts: list[str] = []
     pages: list[int] = []
     for idx, ch in enumerate(chunks, start=1):
