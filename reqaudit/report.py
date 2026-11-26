@@ -57,16 +57,11 @@ def _mode_line(result) -> str:
     parts = ["правила"]
     rev = st.get("reviewers")
     parts.append(f"LLM-консилиум ({rev} проходов)" if rev else "LLM-консилиум")
-    o = st.get("orchestrator")
-    if o == "ok":
-        parts.append("оркестратор")
-    elif o:
-        parts.append(f"без оркестратора ({why.get(o, o)}; детерминированная склейка)")
     j = st.get("judge")
     if j == "ok":
-        parts.append("судья")
+        parts.append("критик")
     elif j:
-        parts.append(f"без судьи ({why.get(j, j)})")
+        parts.append(f"без критика ({why.get(j, j)})")
     a = st.get("answers")
     if a == "ok":
         parts.append("перепроверка по ответам")
@@ -127,11 +122,11 @@ def finding_block(f: Finding, by_id: dict[str, Requirement], total_reviewers: in
             letters = "абвгд"
             opts = " Варианты: " + "; ".join(f"({letters[i]}) {o}" for i, o in enumerate(q.options[:5]))
         out += [f"**Вопрос автору{(' (' + q.addressee + ')') if q.addressee else ''}:** {q.text}{opts}", ""]
-    meta = f"**Кто нашёл:** {_votes_str(f, total_reviewers)} · **Судья:** {JUDGE_RU.get(f.judge, f.judge)}"
+    meta = f"**Кто нашёл:** {_votes_str(f, total_reviewers)} · **Критик:** {JUDGE_RU.get(f.judge, f.judge)}"
     if f.judge_note:
         meta += f" — {f.judge_note}"
     if f.judge_change:
-        meta += f" _(изменения судьи: {f.judge_change})_"
+        meta += f" _(изменения критика: {f.judge_change})_"
     out.append(meta)
     if f.status_note:
         out.append(f"\n_Примечание: {f.status_note.strip()}_")
@@ -166,11 +161,10 @@ def render(result: RunResult, out_path: Path) -> str:
     if result.reviewers:
         revs = "; ".join(f"{p.company} — `{p.model}`" for p in result.reviewers)
         L.append(f"| Модели-ревьюеры | {revs} (проходов: {total}) |")
-    if result.orchestrator:
-        L.append(f"| Оркестратор | {result.orchestrator.company} — `{result.orchestrator.model}` |")
     if result.judge:
-        ind = "независимый, не участвовал в ревью" if result.judge_independent else "участвовал в ревью (независимого судьи нет)"
-        L.append(f"| Судья | {result.judge.company} — `{result.judge.model}` ({ind}) |")
+        ind = "другая модель, в ревью не участвовала" if result.judge_independent else \
+            "отдельный вызов той же модели с задачей опровергнуть каждую находку"
+        L.append(f"| Критик (судья) | {result.judge.company} — `{result.judge.model}` ({ind}) |")
     L.append(f"| Режим | {_mode_line(result)} |")
     s = result.stats
     L.append(f"| Вызовы LLM | {s.llm_calls} (из кэша: {s.llm_cached}, ошибок: {s.llm_failed}); токены: {s.prompt_tokens} → {s.completion_tokens} |")
@@ -318,12 +312,6 @@ def render(result: RunResult, out_path: Path) -> str:
     if not any_crit:
         L.append("- не выявлено")
     L.append("")
-    if result.readiness:
-        L += ["**Готовность по ролям:**", ""]
-        for k, val in result.readiness.items():
-            L.append(f"- {k}: {val}")
-        L.append("")
-
     # итог
     L += ["## 7. Итог", ""]
     for label, key in (("Разработка", "dev"), ("Тестирование", "test")):
@@ -347,7 +335,7 @@ def render(result: RunResult, out_path: Path) -> str:
         L += ["- Проверки, которые прошли успешно:"] + [f"  - {n}" for n in result.notes]
     L.append(f"- Отброшено находок без подтверждённой цитаты: {len(result.dropped_ungrounded)}.")
     if result.rejected:
-        L.append(f"- Отклонено судьёй как ложные срабатывания: {len(result.rejected)} — " +
+        L.append(f"- Отклонено критиком как ложные срабатывания: {len(result.rejected)} — " +
                  "; ".join(f"«{f.title}»" for f in result.rejected[:10]) + ".")
     for w in doc.warnings:
         L.append(f"- ⚠️ {w}")
@@ -370,8 +358,8 @@ def render(result: RunResult, out_path: Path) -> str:
           "4. Консилиум LLM: независимые проходы ревьюеров (разные модели и/или формулировки), каждый — за 5 ролей: разработчик, "
           "тестировщик, архитектор/ИБ, бизнес-аналитик, злонамеренный подрядчик.",
           "5. Проверка цитат кодом: находка без дословной цитаты из документа удаляется.",
-          "6. Склейка одинаковых находок и голосование; оркестратор формулирует итог и вопросы; независимый судья отсеивает "
-          "ложные срабатывания.",
+          "6. Склейка одинаковых находок кодом; затем один вызов-критик пытается опровергнуть каждую находку по тексту документа, "
+          "склеивает оставшиеся дубли и расставляет приоритет вопросов. Тексты находок остаются авторскими (от ревьюеров).",
           "7. Вердикт — по правилу: есть блокер в ключевых разделах → начинать нельзя; есть существенные → с оговорками.",
           "", "**Шкалы:** тяжесть — 🔴 блокер (нельзя начинать разработку/тест), 🟠 существенный, 🟡 незначительный; "
           "доказанность — [Д] доказано текстом, [У] вопрос к автору, [Ш] шаблон/оформление.", "",

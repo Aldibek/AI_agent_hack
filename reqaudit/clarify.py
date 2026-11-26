@@ -67,12 +67,12 @@ def apply_answers(result: RunResult, *, cache_dir: Path | None) -> None:
     tracker = costs.current()
     clients = available_clients(result.stats, cache_dir, tracker=tracker)
     client = None
-    if result.orchestrator and result.orchestrator.name in clients:
-        client = clients[result.orchestrator.name]
-        if result.orchestrator.model and result.orchestrator.model != client.model:
-            client = client.clone(result.orchestrator.model)  # та же модель, что у оркестратора
-        if os.getenv("REQAUDIT_ORCH_EFFORT"):
-            client.reasoning_effort = os.environ["REQAUDIT_ORCH_EFFORT"]
+    if result.judge and result.judge.name in clients:
+        client = clients[result.judge.name]
+        if result.judge.model and result.judge.model != client.model:
+            client = client.clone(result.judge.model)  # та же модель, что у критика
+        if os.getenv("REQAUDIT_JUDGE_EFFORT"):
+            client.reasoning_effort = os.environ["REQAUDIT_JUDGE_EFFORT"]
     elif clients:
         client = next(iter(clients.values()))
     if client:

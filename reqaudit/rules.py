@@ -52,7 +52,7 @@ PLACEHOLDER_RE = re.compile(
     re.I,
 )
 EMPTY_CELL_RE = re.compile(r"^\s*(?:—|-|–|нет|n/?a|tbd)?\s*$", re.I)
-CITY_TZ_RE = re.compile(r"\b(?:по|в)\s+(Алматы|Астан[еыа]|Нур-Султан\w*|Москв[еы]|Ташкент\w*|Бишкек\w*|Шымкент\w*)", re.I)
+CITY_TZ_RE = re.compile(r"\b(?:по|в)\s+(Алматы|Астан[еыа]|Нур-Султан\w*|Москв[еы]|Ташкент\w*|Бишкек\w*|Шымкент\w*|Караганд\w*|Актобе|Атырау|Минск\w*|местному времени|времени клиента)", re.I)
 TIME_CONTEXT_RE = re.compile(r"дат|врем|месяц|сутк|день|дн[яеи]|час|календар", re.I)
 AMOUNT_RE = re.compile(r"(\d{1,3}(?:[   ]\d{3})+|\d+)\s*(?:₸|тенге|тг\b|KZT)", re.I)
 RANGE_RE = re.compile(r"(?:от\s+)?(\d{1,3}(?:[   ]\d{3})+|\d{3,})\s*(?:до|–|—|-)\s*(\d{1,3}(?:[   ]\d{3})+|\d{3,})")
@@ -292,7 +292,7 @@ def rule_status_codes(doc: Document, reqs: list[Requirement]) -> list[Finding]:
 
 
 def rule_units(doc: Document, reqs: list[Requirement]) -> list[Finding]:
-    pairs = [(r"тиын", r"тенге|₸|KZT|limit_kzt", "тиыны", "тенге"), (r"копе[ейк]", r"рубл|₽|RUB", "копейки", "рубли"),
+    pairs = [(r"тиын", r"тенге|₸|KZT|_kzt\b", "тиыны", "тенге"), (r"копе[ейк]", r"рубл|₽|RUB", "копейки", "рубли"),
              (r"\bcents?\b", r"dollars?|USD|\$", "центы", "доллары")]
     out: list[Finding] = []
     for minor_re, major_re, a, b in pairs:
@@ -554,7 +554,8 @@ def rule_card_data(doc: Document, reqs: list[Requirement]) -> list[Finding]:
                "(PAN или токен), как данные маскируются в push и логах и какие требования PCI DSS и закона о персональных "
                "данных применяются.",
                [_q(doc, r.line_start) for r in hits[:2]],
-               suggestion="Указать: cardId — токен, а не PAN; в push только маска «•• 1234»; номер карты и суммы не пишутся в логи и URL.",
+               suggestion="Указать, что идентификатор карты в API и событиях — токен, а не PAN; в уведомлениях и интерфейсе только "
+                          "маска «•• 1234»; номер карты не пишется в логи и URL.",
                question=Question(text="Что такое идентификатор карты в API и событиях — номер карты (PAN) или токен?",
                                  options=["Токен карты", "Маскированный PAN", "Полный PAN (тогда нужен контур PCI DSS)"],
                                  addressee="ИБ"))]

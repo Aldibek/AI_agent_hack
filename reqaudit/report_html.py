@@ -122,7 +122,7 @@ def render_html(result: RunResult, out_path: Path) -> None:
             parts.append(f"<div class='q'><b>Вопрос{(' · ' + e(f.question.addressee)) if f.question.addressee else ''}:</b> "
                          f"{e(f.question.text)}{opts}</div>")
         if f.judge:
-            parts.append(f"<div class='meta' style='margin-top:6px'>Судья: {e({'confirmed': 'подтверждено', 'disputed': 'спорно'}.get(f.judge, f.judge))}"
+            parts.append(f"<div class='meta' style='margin-top:6px'>Критик: {e({'confirmed': 'подтверждено', 'disputed': 'спорно'}.get(f.judge, f.judge))}"
                          f"{' — ' + e(f.judge_note) if f.judge_note else ''}</div>")
         parts.append("</article>")
     parts.append("</section></main>")

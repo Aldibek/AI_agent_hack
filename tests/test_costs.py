@@ -130,13 +130,13 @@ class CostCalcTest(CostsBase):
     def test_estimate_formula(self):
         tr = self.tracker()
         # 3500 символов ≈ 1000 токенов входа по цене записи в кэш; без истории выход судьи — 3000 токенов
-        self.assertAlmostEqual(tr.estimate("claude-opus-5-5", "judge", 3500), 1000 * 5e-6 + 3000 * 20e-6)
+        self.assertAlmostEqual(tr.estimate("claude-opus-5-5", "judge", 3500), 1000 * 5e-6 + 8000 * 20e-6)
         self.assertAlmostEqual(tr.estimate("claude-opus-5-5", "reviewer", 3500), 1000 * 5e-6 + 12000 * 20e-6)
         self.assertAlmostEqual(tr.estimate("claude-opus-5-5", "clarify", 3500), 1000 * 5e-6 + 2000 * 20e-6)
         tr.record(provider="anthropic", model="claude-opus-5-5", role="judge", input_tokens=1, output_tokens=10_000)
         self.assertAlmostEqual(tr.estimate("claude-opus-5-5", "judge", 3500), 1000 * 5e-6 + 10_000 * 20e-6)
         # история другой модели той же роли не влияет
-        self.assertAlmostEqual(tr.estimate("claude-sonnet-5-5", "judge", 3500), 1000 * 2.5e-6 + 3000 * 10e-6)
+        self.assertAlmostEqual(tr.estimate("claude-sonnet-5-5", "judge", 3500), 1000 * 2.5e-6 + 8000 * 10e-6)
         self.assertIsNone(tr.estimate("gemini-flash-latest", "judge", 3500))
 
     def test_estimate_uses_last_successful_calls_from_ledger(self):
@@ -150,7 +150,7 @@ class CostCalcTest(CostsBase):
         self.assertEqual(tr2.avg_output("reviewer", "claude-sonnet-5-5"), 0)
 
     def test_preflight_current_config_realistic(self):
-        """3 прохода Opus + оркестратор Opus + судья Sonnet на docs/requirements.md: $0.8–1.5, а не $0.3."""
+        """3 прохода Opus + критик Opus на docs/requirements.md: $0.8–1.6, а не $0.3."""
         from reqaudit import prompts
         from reqaudit.ingest import load_document
         from reqaudit.pipeline import req_table
@@ -160,15 +160,13 @@ class CostCalcTest(CostsBase):
         reqs = segment(doc)
         numbered = doc.numbered_text()
         user = prompts.reviewer_user(req_table(reqs), numbered)
-        planned = [("claude-opus-5-5", "reviewer", len(prompts.reviewer_system(f, 25)) + len(user)) for f in (0, 2, 3)]
-        planned.append(("claude-opus-5-5", "orchestrator",
-                        len(prompts.ORCH_SYSTEM) + len(prompts.orch_user("", numbered)) + 30_000))
-        planned.append(("claude-sonnet-5-5", "judge",
-                        len(prompts.JUDGE_SYSTEM) + len(prompts.judge_user("", numbered)) + 20_000))
+        planned = [("claude-opus-5-5", "reviewer", len(prompts.reviewer_system(f)) + len(user)) for f in (0, 2, 3)]
+        planned.append(("claude-opus-5-5", "judge",
+                        len(prompts.JUDGE_SYSTEM) + len(prompts.judge_user("", numbered)) + 40_000))
         est, unpriced = self.tracker().preflight(planned)
         self.assertEqual(unpriced, [])
         self.assertGreaterEqual(est, 0.8)
-        self.assertLessEqual(est, 1.5)
+        self.assertLessEqual(est, 1.6)
 
 
 class LedgerTest(CostsBase):
@@ -219,13 +217,13 @@ class BudgetTest(CostsBase):
         self.assertTrue(tr.blocked and "не помещается в бюджет $0.01" in tr.blocked[0])
 
     def test_blocked_expensive_call_does_not_stop_cheap_one(self):
-        # дорогой оркестратор Opus не помещается, дешёвый судья Sonnet — помещается и выполняется
+        # дорогой вызов Opus не помещается, дешёвый вызов Sonnet — помещается и выполняется
         with mock.patch.dict(os.environ, {"REQAUDIT_BUDGET_USD": "0.10"}):
             tr = self.tracker()
         sdk = FakeSDK()
         opus = self.client(sdk, tracker=tr)
         with self.assertRaises(BudgetExceeded):
-            opus.chat([{"role": "user", "content": "x" * 35_000}], role="orchestrator")
+            opus.chat([{"role": "user", "content": "x" * 35_000}], role="reviewer")
         sonnet = self.client(sdk, tracker=tr, model="claude-sonnet-5-5")
         sonnet.chat([{"role": "user", "content": "x" * 1000}], role="judge")
         self.assertEqual(len(sdk.requests), 1)
@@ -453,25 +451,25 @@ class PipelineCostsTest(CostsBase):
 
         result = run(str(self.spec), use_llm=True, cache_dir=None)
         models = [r["model"] for r in self.sdk.requests]
-        self.assertEqual(models.count("claude-opus-5-5"), 4)  # 3 прохода ревьюера + оркестратор
-        self.assertEqual(models[-1], "claude-sonnet-5-5")  # судья — другая модель
+        self.assertEqual(models.count("claude-opus-5-5"), 3)  # 3 прохода ревьюера, оркестратора нет
+        self.assertEqual(models[-1], "claude-sonnet-5-5")  # критик — другая модель
         self.assertTrue(result.judge_independent)
         self.assertEqual(result.judge.model, "claude-sonnet-5-5")
-        self.assertEqual(set(result.costs["by_role"]), {"reviewer", "orchestrator", "judge"})
+        self.assertEqual(set(result.costs["by_role"]), {"reviewer", "judge"})
         self.assertEqual(set(result.costs["by_model"]), {"claude-opus-5-5", "claude-sonnet-5-5"})
         self.assertGreater(result.costs["cost_usd"], 0)
         self.assertEqual(result.budget_stop, "")
-        self.assertEqual(len(self.ledger()), 5)
+        self.assertEqual(len(self.ledger()), 4)
         text = render(result, Path(self.tmp.name) / "r.md")
         self.assertIn("| Стоимость прогона | $", text)
 
-    def test_judge_and_orch_effort(self):
+    def test_judge_effort(self):
         from reqaudit.pipeline import run
 
-        with mock.patch.dict(os.environ, {"REQAUDIT_ORCH_EFFORT": "low", "REQAUDIT_JUDGE_EFFORT": "medium"}):
+        with mock.patch.dict(os.environ, {"REQAUDIT_JUDGE_EFFORT": "medium"}):
             run(str(self.spec), use_llm=True, cache_dir=None)
         efforts = [r["output_config"]["effort"] for r in self.sdk.requests]
-        self.assertEqual(efforts, ["high", "high", "high", "low", "medium"])
+        self.assertEqual(efforts, ["high", "high", "high", "medium"])
 
     def test_preflight_over_budget_stops_before_calls(self):
         from reqaudit.cli import main
@@ -494,25 +492,21 @@ class PipelineCostsTest(CostsBase):
         self.assertEqual(self.sdk.requests, [])  # ни один вызов не прошёл проверку бюджета
         text = out.read_text(encoding="utf-8")
         self.assertIn("не помещается в бюджет $0.0001", text)
-        self.assertIn("без судьи (бюджет)", text)  # режим в паспорте — по фактически выполненным шагам
-        self.assertNotIn("правила + LLM-консилиум + судья", text)
+        self.assertIn("без критика (бюджет)", text)  # режим в паспорте — по фактически выполненным шагам
+        self.assertNotIn("+ критик |", text)
         data = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))
         self.assertIn("costs", data)
         self.assertTrue(data["budget_blocked"])
         self.assertEqual(data["budget_stop"], "")
 
-    def test_orchestrator_model_override(self):
+    def test_mode_line_and_no_orchestrator(self):
         from reqaudit.pipeline import run
         from reqaudit.report import render
 
-        with mock.patch.dict(os.environ, {"REQAUDIT_ORCH_MODEL": "claude-sonnet-5-5"}):
-            result = run(str(self.spec), use_llm=True, cache_dir=None)
-        models = [r["model"] for r in self.sdk.requests]
-        self.assertEqual(models.count("claude-opus-5-5"), 3)  # только ревьюеры
-        self.assertEqual(models[-2:], ["claude-sonnet-5-5", "claude-sonnet-5-5"])  # оркестратор + судья
-        self.assertEqual(result.orchestrator.model, "claude-sonnet-5-5")
+        result = run(str(self.spec), use_llm=True, cache_dir=None)
         text = render(result, Path(self.tmp.name) / "r.md")
-        self.assertIn("| Режим | правила + LLM-консилиум (3/3 проходов) + оркестратор + судья |", text)
+        self.assertIn("| Режим | правила + LLM-консилиум (3/3 проходов) + критик |", text)
+        self.assertNotIn("ркестратор", text)
 
 
 class JudgeProtectionTest(CostsBase):
@@ -529,11 +523,10 @@ class JudgeProtectionTest(CostsBase):
 
         def answer(kw):
             sys_txt = kw.get("system", "")
-            if "независимый судья" in sys_txt:
-                return json.dumps({"verdicts": [{"id": "F-01", "verdict": verdict, "proof": "У", "severity": "major",
-                                                 "note": "строка 5"}]}, ensure_ascii=False)
-            if "оркестр" in sys_txt.lower() or "объединённые находки" in sys_txt:
-                return '{"findings": []}'
+            if "Ты — критик" in sys_txt:
+                return json.dumps({"verdicts": [{"id": f"C-{n:02d}", "verdict": verdict, "proof": "У",
+                                                 "severity": "major", "note": "строка 5"} for n in range(1, 10)],
+                                   "priority": ["C-01"]}, ensure_ascii=False)
             return json.dumps({"findings": [{"category": "contradiction", "severity": "blocker", "proof": "Д",
                                              "title": "Лимит push против push при новом пороге",
                                              "quotes": [{"text": "Не более одного push в месяц."},
@@ -552,6 +545,35 @@ class JudgeProtectionTest(CostsBase):
         self.assertEqual((f.severity, f.proof), ("blocker", "Д"))
         self.assertIn("не принято", f.judge_change)
 
+    def test_critic_merges_duplicates(self):
+        from reqaudit import pipeline
+
+        spec = Path(self.tmp.name) / "d.md"
+        spec.write_text(self.SPEC, encoding="utf-8")
+        seen = {"n": 0}
+
+        def answer(kw):
+            if "Ты — критик" in kw.get("system", ""):
+                items = json.loads(kw["messages"][0]["content"].split("Находки (JSON):\n")[1].split("\n\nДокумент")[0])
+                llm = [i["id"] for i in items if "правила" not in i["votes"]]
+                return json.dumps({"verdicts": [{"id": llm[0], "verdict": "confirmed"},
+                                                {"id": llm[1], "duplicate_of": llm[0]}], "priority": [llm[0]]})
+            seen["n"] += 1
+            line = "Не более одного push в месяц." if seen["n"] == 1 else "При новом пороге отправить push."
+            return json.dumps({"findings": [{"category": "ambiguity", "severity": "major", "title": f"Тема {seen['n']}",
+                                             "quotes": [{"text": line}]}]}, ensure_ascii=False)
+
+        sdk = FakeSDK(text=answer)
+        env = {"ANTHROPIC_API_KEY": "k", "REQAUDIT_REVIEWERS": "anthropic", "ANTHROPIC_FOCUS": "0,2",
+               "REQAUDIT_JUDGE": "anthropic"}
+        with mock.patch.dict(os.environ, env), mock.patch("anthropic.Anthropic", return_value=sdk):
+            res = pipeline.run(str(spec), use_llm=True, cache_dir=None)
+        llm = [f for f in res.findings if not f.is_rule]
+        self.assertEqual(len(llm), 1)  # две находки склеены критиком в одну
+        self.assertEqual(len(llm[0].votes), 2)  # голоса обоих проходов сохранены
+        self.assertEqual(len(llm[0].quotes), 2)
+        self.assertEqual(res.priority, [llm[0].fid])
+
     def test_rejected_is_allowed(self):
         res = self._run("rejected")
         self.assertFalse([f for f in res.findings if f.category == "contradiction" and not f.is_rule])
@@ -565,12 +587,11 @@ class RoleModelTest(unittest.TestCase):
         stats = RunStats()
         gem = LLMClient("gemini", "Google", "gemini-flash-latest", "https://x/v1", "k", stats, None)
         env = {"REQAUDIT_REVIEWERS": "anthropic", "REQAUDIT_ORCHESTRATOR": "anthropic", "REQAUDIT_JUDGE": "anthropic",
-               "REQAUDIT_ORCH_MODEL": "claude-sonnet-5-5", "REQAUDIT_JUDGE_MODEL": "claude-sonnet-5-5"}
+               "REQAUDIT_JUDGE_MODEL": "claude-sonnet-5-5"}
         with mock.patch.dict(os.environ, env):
             clients = {"gemini": gem}
-            reviewers, orch, judge = pick_roles(clients)
+            reviewers, judge = pick_roles(clients)
         self.assertEqual(reviewers, ["gemini"])
-        self.assertEqual(clients[orch].model, "gemini-flash-latest")  # не claude-sonnet-5-5 на Gemini
         self.assertEqual(clients[judge].model, "gemini-flash-latest")
 
 

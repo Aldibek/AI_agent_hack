@@ -1,5 +1,5 @@
 """Конвейер: документ → нарезка → правила + консилиум ревьюеров (параллельно) → проверка цитат →
-склейка и голосование → оркестратор → судья → вердикт."""
+склейка → критик (опровержение, дубли, приоритет) → вердикт."""
 
 from __future__ import annotations
 
@@ -39,10 +39,8 @@ class RunResult(BaseModel):
     dropped_ungrounded: list[Finding] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     priority: list[str] = Field(default_factory=list)
-    readiness: dict[str, str] = Field(default_factory=dict)
     reviewers: list[ProviderInfo] = Field(default_factory=list)
     reviewer_labels: list[str] = Field(default_factory=list)
-    orchestrator: ProviderInfo | None = None
     judge: ProviderInfo | None = None
     judge_independent: bool = False
     failures: list[str] = Field(default_factory=list)
@@ -212,21 +210,13 @@ def pick_roles(clients: dict):
     judge_env = os.getenv("REQAUDIT_JUDGE", "").strip()
     spare = [n for n in names if n not in reviewers]
     judge = judge_env if judge_env in clients else (spare[0] if spare else (reviewers[-1] if reviewers else None))
-    orch_env = os.getenv("REQAUDIT_ORCHESTRATOR", "").strip()
-    orch = orch_env if orch_env in clients else (reviewers[0] if reviewers else None)
-    if judge and judge == orch and len(reviewers) > 1 and not judge_env and not spare:
-        judge = reviewers[1]
     # модель роли подменяем, только если роль досталась тому провайдеру, что указан в .env
-    # (иначе, например, при одном ключе Gemini получили бы запрос claude-sonnet-5-5 к Gemini)
-    om = os.getenv("REQAUDIT_ORCH_MODEL", "").strip()
-    if orch and om and orch == orch_env and om != clients[orch].model:
-        clients["orchestrator"] = clients[orch].clone(om)  # оркестратор — своя модель (по умолчанию Sonnet 5.5)
-        orch = "orchestrator"
+    # (иначе, например, при одном ключе Gemini получили бы запрос claude-opus-5-5 к Gemini)
     jm = os.getenv("REQAUDIT_JUDGE_MODEL", "").strip()
     if judge and jm and judge == judge_env and jm != clients[judge].model:
         clients["judge"] = clients[judge].clone(jm)  # работает для любого провайдера (anthropic, openai, ...)
         judge = "judge"
-    return reviewers, orch, judge
+    return reviewers, judge
 
 
 def _budget_stopped(result: RunResult, e: BudgetExceeded, step: str) -> None:
@@ -235,7 +225,7 @@ def _budget_stopped(result: RunResult, e: BudgetExceeded, step: str) -> None:
             result.budget_stop = str(e)  # дневной лимит — дальше ничего не вызываем
     else:
         result.budget_blocked.append(f"{step}: {e}")  # пропущен только этот шаг
-    key = {"Оркестратор": "orchestrator", "Судья": "judge"}.get(step)
+    key = {"Судья": "judge"}.get(step)
     if key:
         result.steps[key] = "budget"
     result.failures.append(f"{step} не выполнен: {e}")
@@ -277,7 +267,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
     if not clients:
         result.mode = "rules-only"
     else:
-        reviewers, orch_name, judge_name = pick_roles(clients)
+        reviewers, judge_name = pick_roles(clients)
         variants = int(os.getenv("REQAUDIT_VARIANTS", "2" if len(reviewers) == 1 else "1"))
         tasks = []
         for i, name in enumerate(reviewers):
@@ -300,12 +290,9 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
         # ---- предварительная оценка стоимости прогона
         planned = []
         for client, focus, _label in tasks:
-            cap = int(os.getenv(f"{client.name.upper()}_MAX_FINDINGS", "25"))
-            planned.append((client.model, "reviewer", len(prompts.reviewer_system(focus, cap)) + len(user)))
-        planned.append((clients[orch_name].model, "orchestrator",
-                        len(prompts.ORCH_SYSTEM) + len(prompts.orch_user("", numbered)) + 30_000))
+            planned.append((client.model, "reviewer", len(prompts.reviewer_system(focus)) + len(user)))
         planned.append((clients[judge_name].model, "judge",
-                        len(prompts.JUDGE_SYSTEM) + len(prompts.judge_user("", numbered)) + 20_000))
+                        len(prompts.JUDGE_SYSTEM) + len(prompts.judge_user("", numbered)) + 40_000))
         est, unpriced = tracker.preflight(planned)
         log(f"оценка стоимости прогона: ${est:.2f} за {len(planned)} вызовов"
             + (f" (+ н/д для {', '.join(unpriced)})" if unpriced else "")
@@ -320,8 +307,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
         def review(task):
             client, variant, label = task
             started = time.time()
-            cap = int(os.getenv(f"{client.name.upper()}_MAX_FINDINGS", "25"))
-            data = client.chat_json(prompts.reviewer_system(variant, cap), user, max_tokens=40000,
+            data = client.chat_json(prompts.reviewer_system(variant), user, max_tokens=64000,
                                     deadline=float(os.getenv("REQAUDIT_REVIEW_DEADLINE", "480")), role="reviewer")
             fs = _to_findings(data, label)
             log(f"  ревьюер {label}: {len(fs)} находок за {time.time() - started:.0f} с")
@@ -355,66 +341,12 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
             f.status_note = (f.status_note + " " if f.status_note else "") + f"Найдено одним ревьюером из {n_llm_voters}."
     log(f"склейка: {len(merged)} уникальных находок")
 
-    # ---------------------------------------------------------------- оркестратор
-    ids: dict[str, Finding] = {}
-    dup_map: dict[str, str] = {}
-    if clients and merged and tracker.exhausted:
-        result.failures.append("Оркестратор пропущен: исчерпан бюджет — применена детерминированная склейка.")
-        result.steps["orchestrator"] = "budget"
-        prio_objs = []
-    elif clients and merged:
-        orch = clients[orch_name]
-        if os.getenv("REQAUDIT_ORCH_EFFORT"):
-            orch.reasoning_effort = os.environ["REQAUDIT_ORCH_EFFORT"]
-        result.orchestrator = orch.info
-        ids = {f"C-{i:02d}": f for i, f in enumerate(merged, start=1)}
-        payload = json.dumps([_compact(f, k) for k, f in ids.items()], ensure_ascii=False)
-        try:
-            log(f"оркестратор: {orch.label}")
-            data = orch.chat_json(prompts.ORCH_SYSTEM, prompts.orch_user(payload, doc.numbered_text()), max_tokens=40000,
-                                  role="orchestrator")
-            dup = set()
-            dup_map: dict[str, str] = {}
-            for item in data.get("findings") or []:
-                fid = str(item.get("id") or "")
-                f = ids.get(fid)
-                if not f:
-                    continue
-                d_of = item.get("duplicate_of")
-                if d_of and d_of in ids and d_of != fid:
-                    tgt = ids[d_of]
-                    for v in f.votes:
-                        if v not in tgt.votes:
-                            tgt.votes.append(v)
-                    tgt.rids = sorted(set(tgt.rids) | set(f.rids))
-                    seen = {(q.line_start, normalize(q.text)) for q in tgt.quotes}
-                    for q in f.quotes:
-                        if (q.line_start, normalize(q.text)) not in seen and len(tgt.quotes) < 5:
-                            tgt.quotes.append(q)
-                    dup.add(fid)
-                    dup_map[fid] = d_of
-                    continue
-                _apply_orch(f, item)
-            result.priority = [str(x) for x in (data.get("priority") or []) if str(x) in ids and str(x) not in dup]
-            rd = data.get("readiness") or {}
-            result.readiness = {str(k): str(v) for k, v in rd.items() if v} if isinstance(rd, dict) else {}
-            merged = [f for k, f in ids.items() if k not in dup]
-            prio_objs = [ids[k] for k in result.priority]
-            result.steps["orchestrator"] = "ok"
-        except BudgetExceeded as e:
-            _budget_stopped(result, e, "Оркестратор")
-            prio_objs = []
-        except (LLMError, ValueError) as e:
-            result.steps["orchestrator"] = "error"
-            result.failures.append(f"Оркестратор недоступен: {str(e)[:200]} — применена детерминированная склейка.")
-            log(f"  оркестратор упал: {str(e)[:160]}")
-            prio_objs = []
-    else:
-        prio_objs = []
-
+    # Отдельного оркестратора нет: тексты находок остаются авторскими (от ревьюеров), а дубли, приоритет вопросов
+    # и опровержение делает один вызов-критик (судья).
+    prio_objs: list[Finding] = []
     merged.sort(key=_sort_key)
-    for i, f in enumerate(merged, start=1):
-        f.fid = f"F-{i:02d}"
+    ids: dict[str, Finding] = {f"C-{n:02d}": f for n, f in enumerate(merged, start=1)}  # временные номера для критика
+    dup_map: dict[str, str] = {}
 
     # ---------------------------------------------------------------- судья
     if clients and merged and tracker.exhausted:
@@ -426,16 +358,36 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
             judge.reasoning_effort = os.environ["REQAUDIT_JUDGE_EFFORT"]
         result.judge = judge.info
         result.judge_independent = judge.label not in [clients[n].label for n in reviewers]
-        payload = json.dumps([_compact(f, f.fid) for f in merged if f.proof != "Ш"], ensure_ascii=False)
+        payload = json.dumps([_compact(f, cid) for cid, f in ids.items() if f.proof != "Ш"], ensure_ascii=False)
         try:
             log(f"судья: {judge.label}" + ("" if result.judge_independent else " (не независим: участвовал в ревью)"))
-            data = judge.chat_json(prompts.JUDGE_SYSTEM, prompts.judge_user(payload, doc.numbered_text()), max_tokens=24000,
+            data = judge.chat_json(prompts.JUDGE_SYSTEM, prompts.judge_user(payload, doc.numbered_text()), max_tokens=40000,
                                    role="judge")
-            by_id = {f.fid: f for f in merged}
+            by_id = ids
             kinds_of = {r.rid: r.kind for r in reqs}
+            dup: set[str] = set()
             for v in data.get("verdicts") or []:
-                f = by_id.get(str(v.get("id") or ""))
+                cid = str(v.get("id") or "")
+                f = by_id.get(cid)
                 if not f:
+                    continue
+                d_of = str(v.get("duplicate_of") or "")
+                if d_of and d_of in by_id and d_of != cid and d_of not in dup_map:
+                    tgt = by_id[d_of]  # та же проблема: голоса, требования и цитаты переносим в основную находку
+                    for vote in f.votes:
+                        if vote not in tgt.votes:
+                            tgt.votes.append(vote)
+                    tgt.rids = sorted(set(tgt.rids) | set(f.rids))
+                    seen_q = {(q.line_start, normalize(q.text)) for q in tgt.quotes}
+                    for q in f.quotes:
+                        if (q.line_start, normalize(q.text)) not in seen_q and len(tgt.quotes) < 5:
+                            tgt.quotes.append(q)
+                    if not tgt.question and f.question:
+                        tgt.question = f.question
+                    if not tgt.scenario and f.scenario:
+                        tgt.scenario = f.scenario
+                    dup.add(cid)
+                    dup_map[cid] = d_of
                     continue
                 verdict = str(v.get("verdict") or "").lower()
                 f.judge = verdict if verdict in ("confirmed", "disputed", "rejected") else ""
@@ -465,16 +417,15 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
                 if blocked:
                     f.judge_change = (f.judge_change + "; " if f.judge_change else "") + \
                         "не принято (доказанное противоречие): " + ", ".join(blocked)
+            merged = [f for cid, f in ids.items() if cid not in dup]
+            prio_objs = [ids[str(x)] for x in (data.get("priority") or []) if str(x) in ids and str(x) not in dup]
+            if dup:
+                log(f"  критик склеил дублей: {len(dup)}")
             kept = []
             for f in merged:
-                if f.judge == "rejected":
-                    if f.is_rule or "правила" in f.votes:
-                        f.judge = "disputed"  # детерминированные находки не удаляем, только помечаем
-                        kept.append(f)
-                    else:
-                        result.rejected.append(f)
-                else:
-                    kept.append(f)
+                # судья может отклонить любую находку, в том числе от правил: на незнакомом документе правило
+                # может сработать ложно; отклонённые остаются в трассировке (report.json)
+                (result.rejected if f.judge == "rejected" else kept).append(f)
             merged = kept
             result.steps["judge"] = "ok"
         except BudgetExceeded as e:
@@ -502,8 +453,8 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
     result.findings = merged
     alive = {id(f) for f in merged}
     result.priority = [f.fid for f in prio_objs if id(f) in alive]
-    for f in merged:  # внутренние номера оркестратора C-xx в текстах → итоговые F-xx
-        for fld in ("explanation", "scenario", "impact", "suggestion", "status_note"):
+    for f in merged:  # временные номера C-xx в текстах → итоговые F-xx
+        for fld in ("explanation", "scenario", "impact", "suggestion", "status_note", "judge_note"):
             val = getattr(f, fld, "")
             if isinstance(val, str) and "C-" in val:
                 setattr(f, fld, _remap_prose(val, alive, ids, dup_map))
@@ -532,26 +483,3 @@ def _remap_prose(text: str, alive: set[int], ids: dict[str, Finding], dup_map: d
         return f.fid if f is not None and id(f) in alive else "другое замечание"
 
     return re.sub(r"\bC-\d{2,3}\b", repl, text)
-
-
-def _apply_orch(f: Finding, item: dict) -> None:
-    for fld in ("title", "explanation", "scenario", "impact", "suggestion"):
-        val = item.get(fld)
-        if fld == "scenario" and "Разработчик А" in f.scenario:
-            continue  # не затираем сценарий «два разработчика»
-        if isinstance(val, str) and val.strip():
-            setattr(f, fld, val.strip())
-    cat = str(item.get("category") or "").lower()
-    if cat in VALID_CATEGORIES and not f.is_rule:
-        f.category = cat
-        f.criterion = criterion_for(cat)
-    sev = str(item.get("severity") or "").lower()
-    if sev in SEVERITY_ORDER:
-        f.severity = sev
-    pr = str(item.get("proof") or "")
-    if pr in ("Д", "У", "Ш") and not (f.is_rule and f.proof == "Д"):
-        f.proof = pr
-    q = item.get("question")
-    if isinstance(q, dict) and q.get("text"):
-        f.question = Question(text=str(q["text"]), options=[str(o) for o in (q.get("options") or [])][:4],
-                              addressee=str(q.get("addressee") or (f.question.addressee if f.question else "")))
