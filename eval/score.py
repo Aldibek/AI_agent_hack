@@ -62,7 +62,7 @@ def main(report_path: str, gold_path: str) -> None:
     gold = json.load(open(gold_path, encoding="utf-8"))
     findings = rep["findings"]
     if rep["doc"].get("fmt") != "md":
-        src = Path(gold_path).resolve().parent.parent.parent / gold["document"]
+        src = Path(gold_path).resolve().parent.parent / gold["document"]  # корень репозитория
         if src.exists():
             for i, t in enumerate(src.read_text(encoding="utf-8").split("\n"), start=1):
                 GOLD_TEXT[i] = normalize(t)
@@ -71,6 +71,7 @@ def main(report_path: str, gold_path: str) -> None:
     for item in gold["defects"]:
         hits = [f["fid"] for f in findings if matches(item, f)]
         (found if hits else missed).append((item, hits))
+    strict = strict_match(gold["defects"], findings)
     by_sev = {}
     for item, hits in found + missed:
         s = by_sev.setdefault(item["sev"], [0, 0])
@@ -93,6 +94,12 @@ def main(report_path: str, gold_path: str) -> None:
     for item, hits in fp:
         print(f"  ✗ {item['id']} {item['title']} → {', '.join(hits)}")
     print(f"Всего находок в отчёте: {len(findings)}")
+    n_strict = len(strict)
+    used = set(strict.values())
+    print(f"\nСтрого (одна находка закрывает не больше одного дефекта): {n_strict} из {total} "
+          f"({100 * n_strict / total:.0f}%)")
+    print(f"  находок, совпавших с эталоном: {len(used)} из {len(findings)}; остальные {len(findings) - len(used)} "
+          "— вне эталона (новые дефекты или шум, нужен ручной просмотр)")
     sev_ok = [item for item, hits in found if item["sev"] == "B"
               and any(f["severity"] == "blocker" for f in findings if f["fid"] in hits)]
     n_b = sum(1 for item in gold["defects"] if item["sev"] == "B")
@@ -104,6 +111,26 @@ def main(report_path: str, gold_path: str) -> None:
     print("\nНайдено:")
     for item, hits in found:
         print(f"  + {item['id']} [{item['sev']}] {item['title']} → {', '.join(hits[:4])}")
+
+
+def strict_match(defects: list, findings: list) -> dict[str, str]:
+    """Паросочетание «дефект эталона ↔ находка»: каждая находка закрывает не больше одного дефекта."""
+    cand = {d["id"]: [f["fid"] for f in findings if matches(d, f)] for d in defects}
+    owner: dict[str, str] = {}  # fid → id дефекта
+
+    def try_assign(did: str, seen: set) -> bool:
+        for fid in cand[did]:
+            if fid in seen:
+                continue
+            seen.add(fid)
+            if fid not in owner or try_assign(owner[fid], seen):
+                owner[fid] = did
+                return True
+        return False
+
+    for d in sorted(defects, key=lambda d: len(cand[d["id"]])):
+        try_assign(d["id"], set())
+    return {did: fid for fid, did in owner.items()}
 
 
 def critic(rep: dict, gold: dict, found: list) -> None:
