@@ -7,7 +7,6 @@ Streamlit Cloud:   ключ в Secrets — ANTHROPIC_API_KEY (или GEMINI_API_
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import re
@@ -151,7 +150,8 @@ def run_agent(src: Path, fast: bool) -> Path:
     """Запуск того же агента, что из командной строки; ход работы — по шагам."""
     out_dir = RUNS / (time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6])
     out_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [sys.executable, "-m", "reqaudit", str(src), str(out_dir / "report.md")] + (["--no-llm"] if fast else [])
+    # --no-cache: в приложении каждая проверка — заново, модель действительно думает над документом
+    cmd = [sys.executable, "-m", "reqaudit", str(src), str(out_dir / "report.md")] + (["--no-llm"] if fast else ["--no-cache"])
     prog = Progress(fast)
     log: list[str] = []
     proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -208,11 +208,95 @@ def show(out_dir: Path, title: str) -> None:
         if f.exists():
             col.download_button(name, f.read_bytes(), file_name=f"reqaudit_report.{ext}", mime=mime,
                                 width="stretch", key=f"{out_dir.name}-{ext}")
-    html_file = out_dir / "report.html"
-    if html_file.exists():
-        # data:-URL — отчёт открывается в изолированном фрейме без доступа к приложению
-        b64 = base64.b64encode(html_file.read_bytes()).decode("ascii")
-        st.iframe(f"data:text/html;base64,{b64}", height=1100)
+    conclusion(data, findings, reqs, v)
+
+
+SEV_ICON = {"blocker": "🔴", "major": "🟠", "minor": "🟡"}
+SEV_WORD = {"blocker": "блокер", "major": "существенное", "minor": "незначительное"}
+SCEN_RE = re.compile(r"^\s*(?:Сценарий:\s*)?(?P<case>.*?)\s*Разработчик\s*А:\s*(?P<a>.*?)\s*Разработчик\s*Б:\s*(?P<b>.*)$", re.S)
+
+
+def _md(text: str) -> str:
+    """Текст модели/документа → безопасный для Markdown (без случайной разметки)."""
+    t = (text or "").replace("**", "").replace("`", "'")
+    return re.sub(r"([\\*_#>|\[\]$])", r"\\\1", t)
+
+
+def _card_body(f, n_quotes: int = 2) -> None:
+    for q in f.quotes[:n_quotes]:
+        if q.text:
+            st.markdown(f"> {_md(q.text)}  \n> <small>строка {q.line_start}</small>", unsafe_allow_html=True)
+    m = SCEN_RE.match(f.scenario or "")
+    if m:
+        if m["case"].strip():
+            st.markdown(_md(m["case"].strip()))
+        a, b = st.columns(2)
+        a.info(f"**Разработчик А** — {_md(m['a'].strip())}")
+        b.warning(f"**Разработчик Б** — {_md(m['b'].strip())}")
+    elif f.scenario:
+        st.markdown(f"*Сценарий:* {_md(f.scenario)}")
+    if f.suggestion:
+        st.markdown(f"**Исправить:** {_md(f.suggestion)}")
+
+
+def conclusion(data: dict, findings, reqs, v) -> None:
+    from reqaudit.criteria import SEVERITY_ORDER, category_ru
+
+    by_fid = {f.fid: f for f in findings}
+    top = [by_fid[f.fid] for f in v["fix_first"][:5] if f.fid in by_fid]
+    if top:
+        st.subheader("Что исправить в первую очередь")
+        for k, f in enumerate(top, start=1):
+            with st.container(border=True):
+                lines = sorted({q.line_start for q in f.quotes if q.line_start})
+                st.caption(f"{SEV_ICON[f.severity]} {SEV_WORD[f.severity]} · {category_ru(f.category).lower()} · "
+                           f"строки {', '.join(map(str, lines[:5]))} · {f.fid}")
+                st.markdown(f"#### {k}. {_md(f.title)}")
+                _card_body(f)
+
+    prio = [by_fid[x] for x in data.get("priority") or [] if x in by_fid]
+    qs = [f for f in prio if f.question and f.question.text]
+    qs += [f for f in sorted(findings, key=lambda f: SEVERITY_ORDER[f.severity])
+           if f.question and f.question.text and f not in qs]
+    if qs:
+        st.subheader("Вопросы автору")
+        st.markdown("\n".join(f"{k}. {_md(f.question.text)}" +
+                               (f"  \n   <small>{' · '.join(_md(o) for o in f.question.options[:3])} — "
+                                f"{_md(f.question.addressee or 'автор')}, {f.fid}</small>" if f.question.options else "")
+                               for k, f in enumerate(qs[:7], start=1)), unsafe_allow_html=True)
+
+    st.subheader("Проверка каждого требования")
+    cov = data.get("coverage") or {}
+    per_req: dict[str, list] = {}
+    for f in findings:
+        for rid in f.rids:
+            per_req.setdefault(rid, []).append(f)
+    rows = []
+    for r in reqs:
+        fs = sorted(per_req.get(r.rid, []), key=lambda f: SEVERITY_ORDER[f.severity])
+        c = cov.get(r.rid) or {"status": "unchecked", "note": ""}
+        if fs:
+            st_txt, note = f"{SEV_ICON[fs[0].severity]} {SEV_WORD[fs[0].severity]}", ", ".join(f.fid for f in fs)
+        elif c.get("status") == "ok":
+            st_txt, note = "🟢 без замечаний", c.get("note", "")
+        else:
+            st_txt, note = "⚪ не проверено", c.get("note", "")
+        rows.append({"ID": r.rid, "В документе": r.doc_ref or "—", "Итог": st_txt, "Замечания": note,
+                     "Формулировка": (r.summary or "")[:120]})
+    st.dataframe(rows, hide_index=True, width="stretch", height=min(38 * len(rows) + 40, 420))
+
+    st.subheader(f"Все замечания · {len(findings)}")
+    for f in sorted(findings, key=lambda f: (SEVERITY_ORDER[f.severity], f.fid)):
+        with st.expander(f"{SEV_ICON[f.severity]}  {f.fid} · {f.title}"):
+            st.caption(f"{SEV_WORD[f.severity]} · {category_ru(f.category).lower()}"
+                       + (f" · {', '.join(f.rids[:4])}" if f.rids else ""))
+            if f.explanation:
+                st.markdown(_md(f.explanation))
+            _card_body(f, 3)
+            if f.question and f.question.text:
+                st.markdown(f"**Вопрос автору:** {_md(f.question.text)}")
+            crit = {"confirmed": "подтверждено", "disputed": "спорно"}.get(f.judge, "не проверялось")
+            st.caption(f"Нашёл: {', '.join(f.votes) or '—'} · критик: {crit}" + (f" — {f.judge_note}" if f.judge_note else ""))
 
 
 tab_new, tab_sample = st.tabs(["Проверить свой документ", "Пример: документ хакатона"])
