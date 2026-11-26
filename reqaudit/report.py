@@ -175,21 +175,45 @@ def render(result: RunResult, out_path: Path) -> str:
     L.append(f"| Время прогона | {s.seconds:.0f} с |")
     L.append("")
 
-    # коротко
-    L += ["## Коротко", ""]
-    L.append(f"- **Разработку начинать:** {v['dev'][0]}. **Тестирование начинать:** {v['test'][0]}.")
+    # коротко — первая страница: всё, что нужно для решения, без прокрутки
+    cov = result.coverage or {}
+    c_ok = sum(1 for r in reqs if cov.get(r.rid, {}).get("status") == "ok")
+    c_def = sum(1 for r in reqs if cov.get(r.rid, {}).get("status") == "defect")
+    c_un = len(reqs) - c_ok - c_def
     sev = Counter(f.severity for f in findings)
-    L.append(f"- Требований: **{len(reqs)}**. Замечаний: **{len(findings)}** — блокеров {sev.get('blocker', 0)}, "
-             f"существенных {sev.get('major', 0)}, незначительных {sev.get('minor', 0)}.")
-    if v["fix_first"]:
-        L.append("- Исправить в первую очередь: " + "; ".join(f"{f.fid} — {f.title}" for f in v["fix_first"][:3]) + ".")
-    top_q = [f for fid in result.priority for f in findings if f.fid == fid and f.question][:3] or \
-        sorted([f for f in findings if f.question], key=lambda f: SEVERITY_ORDER[f.severity])[:3]
-    if top_q:
-        L.append("- Главные вопросы автору:")
-        for f in top_q:
-            L.append(f"  - {f.question.text} ({f.fid})")
+    L += ["## Коротко", ""]
+    L.append(f"**Разработку начинать: {v['dev'][0].lower()}. Тестирование начинать: {v['test'][0].lower()}.**")
     L.append("")
+    L.append(f"- Требований: **{len(reqs)}** — с дефектами {c_def}, проверено без дефектов {c_ok}"
+             + (f", **не проверено {c_un}**" if c_un else "") + ".")
+    L.append(f"- Замечаний: **{len(findings)}** — 🔴 блокеров {sev.get('blocker', 0)}, 🟠 существенных {sev.get('major', 0)}, "
+             f"🟡 незначительных {sev.get('minor', 0)}.")
+    L.append("")
+    top = v["fix_first"][:5]
+    if top:
+        L += ["**Что исправить в первую очередь:**", ""]
+        for k, f in enumerate(top, start=1):
+            mark = {"blocker": "🔴", "major": "🟠", "minor": "🟡"}[f.severity]
+            lines = sorted({q.line_start for q in f.quotes if q.line_start})
+            where = ("строки " + ", ".join(map(str, lines[:4]))) if len(lines) > 1 else (f"строка {lines[0]}" if lines else "")
+            L.append(f"{k}. {mark} **{f.fid} · {_esc(f.title)}** ({where})")
+            q0 = next((q for q in f.quotes if q.text), None)
+            if q0:
+                L.append(f"   > «{_esc(q0.text[:160])}»")
+            if f.scenario:
+                L.append(f"   {_esc(f.scenario[:300])}")
+            if f.suggestion:
+                L.append(f"   **Исправить:** {_esc(f.suggestion[:220])}")
+            L.append("")
+    top_q = [f for fid in result.priority for f in findings if f.fid == fid and f.question and f.question.text][:3] or \
+        sorted([f for f in findings if f.question and f.question.text], key=lambda f: SEVERITY_ORDER[f.severity])[:3]
+    if top_q:
+        L += ["**Главные вопросы автору:**", ""]
+        for f in top_q:
+            opts = (" (" + _esc(" / ".join(f.question.options[:3])) + ")") if f.question.options else ""
+            L.append(f"- {_esc(f.question.text)}{opts} → {f.fid}")
+        L.append("")
+    L += ["_Подробности: разделы 2–8 ниже; наглядная версия с подсветкой строк документа — файл .html рядом._", ""]
 
     # 2. нарезка
     L += ["## 2. Как агент нарезал требования", "",
