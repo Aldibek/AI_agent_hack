@@ -26,7 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--interactive", action="store_true", help="задать главные вопросы в терминале и перепроверить")
     p.add_argument("--answers", help="YAML/JSON с ответами на вопросы (повторяемый прогон)")
     p.add_argument("--reviewers",
-                   help="провайдеры-ревьюеры через запятую (anthropic,alem,gemma,gemini,groq,openrouter,openai,ollama)")
+                   help="провайдеры-ревьюеры через запятую (anthropic,gemini,groq,openrouter,openai,ollama)")
     p.add_argument("--judge", help="провайдер-судья")
     p.add_argument("--variants", type=int, help="число проходов ревьюера на одну модель (по умолчанию 2 при одной модели)")
     p.add_argument("--force-budget", action="store_true",

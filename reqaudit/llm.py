@@ -1,5 +1,5 @@
 """Клиенты LLM: Claude (Anthropic, официальный SDK) и любой OpenAI-совместимый API
-(AlemLLM, Gemini, Groq, OpenRouter, OpenAI, Ollama).
+(Gemini, Groq, OpenRouter, OpenAI, Ollama).
 
 - JSON-режим с автоматическим отключением, если провайдер его не поддерживает;
 - повторы с экспоненциальной задержкой при 429/5xx/таймаутах;
@@ -25,9 +25,6 @@ from .models import ProviderInfo, RunStats
 PROVIDERS = {
     # name: (company, env key, env model, default model, env base, default base)
     "anthropic": ("Anthropic", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "claude-opus-5-5", "ANTHROPIC_BASE_URL", ""),
-    "alem": ("alem.ai (Казахстан)", "ALEM_API_KEY", "ALEM_MODEL", "alemllm", "ALEM_BASE_URL", "https://llm.alem.ai/v1"),
-    "gemma": ("Google Gemma (через alem.ai)", "GEMMA_API_KEY", "GEMMA_MODEL", "gemma4", "GEMMA_BASE_URL",
-              "https://llm.alem.ai/v1"),
     "gemini": ("Google", "GEMINI_API_KEY", "GEMINI_MODEL", "gemini-flash-latest", "GEMINI_BASE_URL",
                "https://generativelanguage.googleapis.com/v1beta/openai"),
     "groq": ("Groq", "GROQ_API_KEY", "GROQ_MODEL", "llama-3.3-70b-versatile", "GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
@@ -35,7 +32,7 @@ PROVIDERS = {
     "openai": ("OpenAI", "OPENAI_API_KEY", "OPENAI_MODEL", "gpt-4o-mini", "OPENAI_BASE_URL", "https://api.openai.com/v1"),
     "ollama": ("локальная модель (Ollama)", "", "OLLAMA_MODEL", "", "OLLAMA_BASE_URL", ""),
 }
-PRIORITY = ["anthropic", "alem", "gemma", "gemini", "groq", "openrouter", "openai", "ollama"]
+PRIORITY = ["anthropic", "gemini", "groq", "openrouter", "openai", "ollama"]
 
 
 class LLMError(RuntimeError):
@@ -85,7 +82,8 @@ class LLMClient:
 
     # ------------------------------------------------------------------ calls
     def chat(self, messages: list[dict], temperature: float = 0.0, max_tokens: int | None = None,
-             json_mode: bool = True, deadline: float | None = None, role: str = "reviewer") -> str:
+             json_mode: bool = True, deadline: float | None = None, role: str = "reviewer",
+             meta: dict | None = None) -> str:
         payload: dict = {"model": self.model, "messages": messages}
         if not self.no_temperature:
             payload["temperature"] = temperature
@@ -208,15 +206,37 @@ class LLMClient:
 
 def _chat_json(client, system: str, user: str, temperature: float, max_tokens: int | None,
                deadline: float | None, role: str) -> dict:
+    """Вызов с разбором JSON.
+
+    - ответ обрезан по max_tokens → один повтор того же запроса с удвоенным лимитом (до ANTHROPIC_MAX_TOKENS);
+      если лимит уже максимальный или повтор снова обрезан — LLMError (повтор с тем же лимитом только жжёт деньги);
+    - JSON невалиден без обрезки → одна просьба переписать ответ строго JSON-объектом.
+    """
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-    content = client.chat(messages, temperature=temperature, max_tokens=max_tokens, deadline=deadline, role=role)
+    meta: dict = {}
+    content = client.chat(messages, temperature=temperature, max_tokens=max_tokens, deadline=deadline, role=role,
+                          meta=meta)
     try:
         return parse_json(content)
     except ValueError:
-        messages += [{"role": "assistant", "content": content[:4000]},
-                     {"role": "user", "content": "Ответ не является валидным JSON. Верни тот же ответ строго одним JSON-объектом, без пояснений и markdown."}]
-        content = client.chat(messages, temperature=0.0, max_tokens=max_tokens, role=role)
-        return parse_json(content)
+        pass
+    if meta.get("truncated"):
+        used = int(meta.get("max_tokens") or max_tokens or ANTHROPIC_MAX_TOKENS)
+        if used >= ANTHROPIC_MAX_TOKENS:
+            raise LLMError(f"{client.label} ({role}): ответ обрезан по max_tokens={used}, JSON неполный")
+        bigger = min(used * 2, ANTHROPIC_MAX_TOKENS)
+        meta = {}
+        content = client.chat(messages, temperature=temperature, max_tokens=bigger, deadline=deadline, role=role,
+                              meta=meta)
+        try:
+            return parse_json(content)
+        except ValueError as e:
+            why = f"обрезан по max_tokens={bigger}" if meta.get("truncated") else "невалидный JSON"
+            raise LLMError(f"{client.label} ({role}): после повтора с max_tokens={bigger} ответ {why}") from e
+    messages += [{"role": "assistant", "content": content[:4000]},
+                 {"role": "user", "content": "Ответ не является валидным JSON. Верни тот же ответ строго одним JSON-объектом, без пояснений и markdown."}]
+    content = client.chat(messages, temperature=0.0, max_tokens=max_tokens, role=role)
+    return parse_json(content)
 
 
 def _chars(messages: list[dict]) -> int:
@@ -263,6 +283,16 @@ def parse_json(text: str) -> dict:
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 ANTHROPIC_MAX_TOKENS = 64000
+# Минимальный потолок ответа Claude: reasoning-токены входят в max_tokens, при 16000 JSON обрезался.
+# Это потолок, а не плата — оплачиваются только реально сгенерированные токены.
+ANTHROPIC_MIN_MAX_TOKENS = 40000
+
+
+def anthropic_min_max_tokens() -> int:
+    try:
+        return int(os.getenv("ANTHROPIC_MIN_MAX_TOKENS", "").strip() or ANTHROPIC_MIN_MAX_TOKENS)
+    except ValueError:
+        return ANTHROPIC_MIN_MAX_TOKENS
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 
@@ -331,7 +361,8 @@ class AnthropicClient:
         msgs = [{"role": m["role"], "content": m.get("content") or ""} for m in messages if m.get("role") != "system"]
         req: dict = {
             "model": self.model,
-            "max_tokens": min(int(max_tokens), ANTHROPIC_MAX_TOKENS) if max_tokens else ANTHROPIC_MAX_TOKENS,
+            "max_tokens": (min(max(int(max_tokens), anthropic_min_max_tokens()), ANTHROPIC_MAX_TOKENS) if max_tokens
+                           else ANTHROPIC_MAX_TOKENS),
             "messages": msgs,
             "output_config": {"effort": self._effort()},
             "cache_control": {"type": "ephemeral"},
@@ -351,7 +382,9 @@ class AnthropicClient:
         return self.cache_dir / f"{self.name}_{key}.json"
 
     def chat(self, messages: list[dict], temperature: float = 0.0, max_tokens: int | None = None,
-             json_mode: bool = True, deadline: float | None = None, role: str = "reviewer") -> str:
+             json_mode: bool = True, deadline: float | None = None, role: str = "reviewer",
+             meta: dict | None = None) -> str:
+        """meta (необязательно) — словарь, куда пишутся truncated (ответ обрезан по max_tokens) и max_tokens."""
         # temperature и json_mode игнорируются: Claude не принимает temperature, JSON задаётся промптом
         import anthropic
 
@@ -419,6 +452,9 @@ class AnthropicClient:
             with self._lock:
                 self.stats.events.append(f"{self.label} ({role}): ответ обрезан по max_tokens={req['max_tokens']}"
                                          + (f" [request_id {request_id}]" if request_id else ""))
+        if meta is not None:
+            meta["truncated"] = msg.stop_reason == "max_tokens"
+            meta["max_tokens"] = req["max_tokens"]
         content = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
         if cache and content.strip() and msg.stop_reason != "max_tokens":
             cache.parent.mkdir(parents=True, exist_ok=True)

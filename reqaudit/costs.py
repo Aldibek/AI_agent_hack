@@ -30,7 +30,10 @@ DEFAULT_PRICES: dict[str, dict[str, float]] = {
     "claude-haiku-5-5": {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125},
 }
 CHARS_PER_TOKEN = 3.5
-MIN_OUTPUT_ESTIMATE = 2000
+MIN_OUTPUT_ESTIMATE = 2000  # роль без дефолта и без истории
+# выход на вызов по роли, если в журнале нет истории этой роли и модели (reasoning-токены входят в выход)
+DEFAULT_OUTPUT_ESTIMATE = {"reviewer": 12000, "orchestrator": 12000, "judge": 3000}
+OUTPUT_HISTORY_WINDOW = 5  # среднее по последним N успешным вызовам роли и модели
 WARN_SHARE = 0.8
 ANOMALY_FACTOR = 2.0
 ANOMALY_WINDOW = 10
@@ -138,10 +141,10 @@ class CostTracker:
         history = read_ledger(self.path)
         today = datetime.now().strftime("%Y-%m-%d")
         self.daily_before = sum(float(r.get("cost_usd") or 0) for r in history if _day(r.get("ts", "")) == today)
-        self._out_hist: dict[str, list[int]] = defaultdict(list)
+        self._out_hist: dict[tuple[str, str], list[int]] = defaultdict(list)
         for r in history:
             if r.get("ok") and not r.get("cached") and r.get("output_tokens"):
-                self._out_hist[str(r.get("role") or "")].append(int(r["output_tokens"]))
+                self._out_hist[(str(r.get("role") or ""), str(r.get("model") or ""))].append(int(r["output_tokens"]))
 
     # ------------------------------------------------------------------ состояние
     @property
@@ -155,16 +158,23 @@ class CostTracker:
     def price_known(self, model: str) -> bool:
         return model in self.prices
 
-    def avg_output(self, role: str) -> float:
-        h = self._out_hist.get(role) or []
+    def avg_output(self, role: str, model: str) -> float:
+        """Средний выход по последним успешным вызовам этой роли и модели; 0 — истории нет."""
+        h = (self._out_hist.get((role, model)) or [])[-OUTPUT_HISTORY_WINDOW:]
         return sum(h) / len(h) if h else 0.0
 
+    def expected_output(self, role: str, model: str) -> float:
+        return self.avg_output(role, model) or DEFAULT_OUTPUT_ESTIMATE.get(role, MIN_OUTPUT_ESTIMATE)
+
     def estimate(self, model: str, role: str, input_chars: int) -> float | None:
+        """Оценка вызова в $. Вход считается по цене записи в кэш, если она задана (Claude: cache_control
+        ephemeral — весь вход пишется в кэш), иначе по обычной цене входа."""
         p = self.prices.get(model)
         if not p:
             return None
-        out = max(MIN_OUTPUT_ESTIMATE, self.avg_output(role))
-        return (input_chars / CHARS_PER_TOKEN) * p["input"] / 1_000_000 + out * p["output"] / 1_000_000
+        in_price = p.get("cache_write") or p["input"]
+        out = self.expected_output(role, model)
+        return (input_chars / CHARS_PER_TOKEN) * in_price / 1_000_000 + out * p["output"] / 1_000_000
 
     # ------------------------------------------------------------------ события
     def _event(self, msg: str) -> None:
@@ -219,7 +229,7 @@ class CostTracker:
             self.reserved = max(0.0, self.reserved - reserved)
             self.calls.append(row)
             if ok and not cached and output_tokens:
-                self._out_hist[role].append(int(output_tokens))
+                self._out_hist[(role, model)].append(int(output_tokens))
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")

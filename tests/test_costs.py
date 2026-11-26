@@ -108,34 +108,68 @@ class CostCalcTest(CostsBase):
         self.assertAlmostEqual(call_cost("claude-haiku-5-5", 2_000_000, 0, 0, 1_000_000), 0.325)
 
     def test_unknown_model_cost_is_none(self):
-        self.assertIsNone(call_cost("gemma4", 1000, 1000))
+        self.assertIsNone(call_cost("llama-3.3-70b-versatile", 1000, 1000))
         tr = self.tracker()
-        row = tr.record(provider="gemma", model="gemma4", role="reviewer", input_tokens=10, output_tokens=5)
+        row = tr.record(provider="groq", model="llama-3.3-70b-versatile", role="reviewer", input_tokens=10, output_tokens=5)
         self.assertIsNone(row["cost_usd"])
         self.assertEqual(row["input_tokens"], 10)
-        self.assertEqual(tr.summary()["unpriced_models"], ["gemma4"])
+        self.assertEqual(tr.summary()["unpriced_models"], ["llama-3.3-70b-versatile"])
         self.assertIn("н/д", costs.passport_line(tr.summary()))
 
     def test_prices_file_override(self):
         p = Path(self.tmp.name) / "prices.json"
-        p.write_text(json.dumps({"gemma4": {"input": 1, "output": 2, "cache_read": 0, "cache_write": 0},
+        p.write_text(json.dumps({"llama-3.3-70b-versatile": {"input": 1, "output": 2, "cache_read": 0, "cache_write": 0},
                                  "claude-opus-5-5": {"input": 10}}), encoding="utf-8")
         with mock.patch.dict(os.environ, {"REQAUDIT_PRICES_FILE": str(p)}):
             prices = costs.load_prices()
-        self.assertAlmostEqual(call_cost("gemma4", 1_000_000, 1_000_000, prices=prices), 3.0)
+        self.assertAlmostEqual(call_cost("llama-3.3-70b-versatile", 1_000_000, 1_000_000, prices=prices), 3.0)
         self.assertEqual(prices["claude-opus-5-5"]["input"], 10)
         self.assertEqual(prices["claude-opus-5-5"]["output"], 20.0)  # не указанное — из таблицы по умолчанию
 
     def test_estimate_formula(self):
         tr = self.tracker()
-        # 3500 символов ≈ 1000 токенов входа, выход — не меньше 2000 токенов
-        self.assertAlmostEqual(tr.estimate("claude-opus-5-5", "judge", 3500), 1000 * 4e-6 + 2000 * 20e-6)
+        # 3500 символов ≈ 1000 токенов входа по цене записи в кэш; без истории выход судьи — 3000 токенов
+        self.assertAlmostEqual(tr.estimate("claude-opus-5-5", "judge", 3500), 1000 * 5e-6 + 3000 * 20e-6)
+        self.assertAlmostEqual(tr.estimate("claude-opus-5-5", "reviewer", 3500), 1000 * 5e-6 + 12000 * 20e-6)
+        self.assertAlmostEqual(tr.estimate("claude-opus-5-5", "clarify", 3500), 1000 * 5e-6 + 2000 * 20e-6)
         tr.record(provider="anthropic", model="claude-opus-5-5", role="judge", input_tokens=1, output_tokens=10_000)
-        self.assertAlmostEqual(tr.estimate("claude-opus-5-5", "judge", 3500), 1000 * 4e-6 + 10_000 * 20e-6)
-        self.assertIsNone(tr.estimate("gemma4", "judge", 3500))
+        self.assertAlmostEqual(tr.estimate("claude-opus-5-5", "judge", 3500), 1000 * 5e-6 + 10_000 * 20e-6)
+        # история другой модели той же роли не влияет
+        self.assertAlmostEqual(tr.estimate("claude-sonnet-5-5", "judge", 3500), 1000 * 2.5e-6 + 3000 * 10e-6)
+        self.assertIsNone(tr.estimate("llama-3.3-70b-versatile", "judge", 3500))
+
+    def test_estimate_uses_last_successful_calls_from_ledger(self):
+        tr = self.tracker()
+        for out in (100, 100, 15000, 15000, 15000, 15000, 15000):
+            tr.record(provider="anthropic", model="claude-opus-5-5", role="reviewer", output_tokens=out)
+        tr.record(provider="anthropic", model="claude-opus-5-5", role="reviewer", output_tokens=1, ok=False)
+        tr.record(provider="anthropic", model="claude-opus-5-5", role="reviewer", cached=True)
+        tr2 = self.tracker()  # новый прогон читает историю из журнала
+        self.assertEqual(tr2.avg_output("reviewer", "claude-opus-5-5"), 15000)
+        self.assertEqual(tr2.avg_output("reviewer", "claude-sonnet-5-5"), 0)
+
+    def test_preflight_current_config_realistic(self):
+        """3 прохода Opus + оркестратор Opus + судья Sonnet на docs/requirements.md: $0.8–1.5, а не $0.3."""
+        from reqaudit import prompts
+        from reqaudit.ingest import load_document
+        from reqaudit.pipeline import req_table
+        from reqaudit.segment import segment
+
+        doc = load_document(str(Path(__file__).resolve().parent.parent / "docs" / "requirements.md"))
+        reqs = segment(doc)
+        numbered = doc.numbered_text()
+        user = prompts.reviewer_user(req_table(reqs), numbered)
+        planned = [("claude-opus-5-5", "reviewer", len(prompts.reviewer_system(f, 25)) + len(user)) for f in (0, 2, 3)]
+        planned.append(("claude-opus-5-5", "orchestrator",
+                        len(prompts.ORCH_SYSTEM) + len(prompts.orch_user("", numbered)) + 30_000))
+        planned.append(("claude-sonnet-5-5", "judge",
+                        len(prompts.JUDGE_SYSTEM) + len(prompts.judge_user("", numbered)) + 20_000))
+        est, unpriced = self.tracker().preflight(planned)
+        self.assertEqual(unpriced, [])
+        self.assertGreaterEqual(est, 0.8)
+        self.assertLessEqual(est, 1.5)
 
 
-# ---------------------------------------------------------------------- журнал
 class LedgerTest(CostsBase):
     def test_real_and_cached_calls_written(self):
         cache = Path(self.tmp.name) / "cache"
@@ -253,7 +287,7 @@ class AnthropicRequestTest(CostsBase):
             self.assertNotIn(k, req)
         self.assertEqual(req["output_config"], {"effort": "high"})
         self.assertEqual(req["cache_control"], {"type": "ephemeral"})
-        self.assertEqual(req["max_tokens"], 16000)
+        self.assertEqual(req["max_tokens"], 40000)  # минимальный потолок ANTHROPIC_MIN_MAX_TOKENS
         self.assertEqual(req["betas"], ["server-side-fallback-2026-07-01"])
         self.assertEqual(req["fallbacks"], "default")
         c.chat([{"role": "user", "content": "U2"}])
@@ -287,6 +321,49 @@ class AnthropicRequestTest(CostsBase):
         c = self.client(FakeSDK(stop_reason="max_tokens"), stats=stats)
         c.chat([{"role": "user", "content": "U"}], max_tokens=100)
         self.assertTrue(any("max_tokens" in e for e in stats.events))
+
+    def test_min_max_tokens_env(self):
+        sdk = FakeSDK()
+        with mock.patch.dict(os.environ, {"ANTHROPIC_MIN_MAX_TOKENS": "1000"}):
+            self.client(sdk).chat([{"role": "user", "content": "U"}], max_tokens=6000)
+        self.client(sdk).chat([{"role": "user", "content": "U"}], max_tokens=50000)
+        self.assertEqual([r["max_tokens"] for r in sdk.requests], [6000, 50000])
+
+    def test_truncated_json_retried_once_with_double_limit(self):
+        calls = []
+
+        class Trunc(FakeSDK):
+            def respond(self, kwargs):
+                calls.append(kwargs["max_tokens"])
+                self.stop_reason = "max_tokens" if len(calls) == 1 else "end_turn"
+                self.text = '{"findings": [' if len(calls) == 1 else '{"findings": []}'
+                return super().respond(kwargs)
+
+        c = self.client(Trunc())
+        self.assertEqual(c.chat_json("S", "U", max_tokens=40000), {"findings": []})
+        self.assertEqual(calls, [40000, 64000])
+
+    def test_truncated_at_max_limit_not_retried(self):
+        sdk = FakeSDK(text='{"findings": [', stop_reason="max_tokens")
+        with self.assertRaises(LLMError) as cm:
+            self.client(sdk).chat_json("S", "U", max_tokens=64000)
+        self.assertIn("обрезан", str(cm.exception))
+        self.assertEqual(len(sdk.requests), 1)
+
+    def test_truncated_twice_raises(self):
+        sdk = FakeSDK(text='{"findings": [', stop_reason="max_tokens")
+        with self.assertRaises(LLMError):
+            self.client(sdk).chat_json("S", "U", max_tokens=40000)
+        self.assertEqual([r["max_tokens"] for r in sdk.requests], [40000, 64000])
+
+    def test_invalid_json_without_truncation_asks_again(self):
+        answers = iter(["не JSON", '{"ok": 1}'])
+        sdk = FakeSDK(text=lambda kw: next(answers))
+        self.assertEqual(self.client(sdk).chat_json("S", "U", max_tokens=40000), {"ok": 1})
+        self.assertEqual(len(sdk.requests), 2)
+        self.assertEqual(sdk.requests[1]["max_tokens"], 40000)
+        self.assertEqual(sdk.requests[1]["messages"][-1]["role"], "user")
+        self.assertEqual(len(sdk.requests[1]["messages"]), 3)
 
     def test_sdk_error_is_llm_error(self):
         import anthropic

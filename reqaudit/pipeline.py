@@ -308,7 +308,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
             client, variant, label = task
             started = time.time()
             cap = int(os.getenv(f"{client.name.upper()}_MAX_FINDINGS", "25"))
-            data = client.chat_json(prompts.reviewer_system(variant, cap), user, max_tokens=16000,
+            data = client.chat_json(prompts.reviewer_system(variant, cap), user, max_tokens=40000,
                                     deadline=float(os.getenv("REQAUDIT_REVIEW_DEADLINE", "480")), role="reviewer")
             fs = _to_findings(data, label)
             log(f"  ревьюер {label}: {len(fs)} находок за {time.time() - started:.0f} с")
@@ -354,7 +354,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
         payload = json.dumps([_compact(f, k) for k, f in ids.items()], ensure_ascii=False)
         try:
             log(f"оркестратор: {orch.label}")
-            data = orch.chat_json(prompts.ORCH_SYSTEM, prompts.orch_user(payload, doc.numbered_text()), max_tokens=32000,
+            data = orch.chat_json(prompts.ORCH_SYSTEM, prompts.orch_user(payload, doc.numbered_text()), max_tokens=40000,
                                   role="orchestrator")
             dup = set()
             dup_map: dict[str, str] = {}
@@ -410,7 +410,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
         payload = json.dumps([_compact(f, f.fid) for f in merged if f.proof != "Ш"], ensure_ascii=False)
         try:
             log(f"судья: {judge.label}" + ("" if result.judge_independent else " (не независим: участвовал в ревью)"))
-            data = judge.chat_json(prompts.JUDGE_SYSTEM, prompts.judge_user(payload, doc.numbered_text()), max_tokens=16000,
+            data = judge.chat_json(prompts.JUDGE_SYSTEM, prompts.judge_user(payload, doc.numbered_text()), max_tokens=24000,
                                    role="judge")
             by_id = {f.fid: f for f in merged}
             for v in data.get("verdicts") or []:
