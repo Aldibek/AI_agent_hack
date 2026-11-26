@@ -93,12 +93,43 @@ def main(report_path: str, gold_path: str) -> None:
     for item, hits in fp:
         print(f"  ✗ {item['id']} {item['title']} → {', '.join(hits)}")
     print(f"Всего находок в отчёте: {len(findings)}")
+    sev_ok = [item for item, hits in found if item["sev"] == "B"
+              and any(f["severity"] == "blocker" for f in findings if f["fid"] in hits)]
+    n_b = sum(1 for item in gold["defects"] if item["sev"] == "B")
+    print(f"Эталонные блокеры, отмеченные в отчёте как 🔴 блокер: {len(sev_ok)} из {n_b}")
+    critic(rep, gold, found)
     print("\nПропущено:")
     for item, _ in missed:
         print(f"  - {item['id']} [{item['sev']}] {item['title']}")
     print("\nНайдено:")
     for item, hits in found:
         print(f"  + {item['id']} [{item['sev']}] {item['title']} → {', '.join(hits[:4])}")
+
+
+def critic(rep: dict, gold: dict, found: list) -> None:
+    """Качество судьи-критика: не отклонил/не ослабил ли верное, отсеял ли ложное."""
+    findings = rep["findings"]
+    if not rep.get("judge"):
+        print("\nКритик (судья): не запускался")
+        return
+    by_fid = {f["fid"]: f for f in findings}
+    gold_fids = {h for _, hits in found for h in hits}
+    gold_f = [by_fid[h] for h in gold_fids if h in by_fid]
+    verdicts = {}
+    for f in gold_f:
+        verdicts[f.get("judge") or "—"] = verdicts.get(f.get("judge") or "—", 0) + 1
+    weakened = [f for f in gold_f if "тяжесть" in (f.get("judge_change") or "") and "→" in f.get("judge_change", "")
+                and "не принято" not in f.get("judge_change", "")]
+    downs = [f for f in weakened if any(a + "→" + b in f["judge_change"] for a, b in
+                                        (("blocker", "major"), ("blocker", "minor"), ("major", "minor")))]
+    rej_gold = [d["id"] for d in gold["defects"] for f in rep.get("rejected", []) if matches(d, f)]
+    rej_nd = [d["id"] for d in gold.get("non_defects", []) for f in rep.get("rejected", []) if matches(d, f)]
+    other_rej = len(rep.get("rejected", [])) - len(set(rej_gold)) - len(set(rej_nd))
+    print(f"\nКритик (судья {rep['judge']['model']}):")
+    print(f"  находки, совпавшие с эталонными дефектами: {len(gold_f)} — вердикты {verdicts}")
+    print(f"  эталонных дефектов отклонено (ошибка критика): {len(set(rej_gold))} {sorted(set(rej_gold))}")
+    print(f"  эталонных находок понижено по тяжести: {len(downs)} " + ", ".join(f['fid'] for f in downs))
+    print(f"  «не-дефектов» отклонено (польза критика): {len(set(rej_nd))}; прочих отклонённых: {max(other_rej, 0)}")
 
 
 if __name__ == "__main__":

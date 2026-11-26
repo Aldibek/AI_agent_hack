@@ -432,6 +432,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
             data = judge.chat_json(prompts.JUDGE_SYSTEM, prompts.judge_user(payload, doc.numbered_text()), max_tokens=24000,
                                    role="judge")
             by_id = {f.fid: f for f in merged}
+            kinds_of = {r.rid: r.kind for r in reqs}
             for v in data.get("verdicts") or []:
                 f = by_id.get(str(v.get("id") or ""))
                 if not f:
@@ -439,11 +440,31 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
                 verdict = str(v.get("verdict") or "").lower()
                 f.judge = verdict if verdict in ("confirmed", "disputed", "rejected") else ""
                 f.judge_note = str(v.get("note") or "")[:300]
-                if str(v.get("proof")) in ("Д", "У", "Ш"):
-                    if not (f.is_rule and f.proof == "Д"):
-                        f.proof = str(v["proof"])
-                if str(v.get("severity")) in SEVERITY_ORDER:
-                    f.severity = str(v["severity"])
+                new_proof = str(v.get("proof") or "")
+                new_sev = str(v.get("severity") or "")
+                # Доказанное противоречие в ФТ / критериях приёмки (≥2 несовместимые цитаты) судья может только
+                # отклонить с обоснованием — понижать тяжесть или доказанность ему не даём.
+                protected = (f.category == "contradiction" and f.proof == "Д"
+                             and len({q.line_start for q in f.quotes}) >= 2
+                             and bool({kinds_of.get(r) for r in f.rids} & {"FR", "AC"}))
+                changes, blocked = [], []
+                if new_proof in ("Д", "У", "Ш") and new_proof != f.proof:
+                    if (f.is_rule and f.proof == "Д") or (protected and f.judge != "rejected"):
+                        blocked.append(f"доказанность {f.proof}→{new_proof}")
+                    else:
+                        changes.append(f"доказанность {f.proof}→{new_proof}")
+                        f.proof = new_proof
+                if new_sev in SEVERITY_ORDER and new_sev != f.severity:
+                    down = SEVERITY_ORDER[new_sev] > SEVERITY_ORDER[f.severity]
+                    if protected and down and f.judge != "rejected":
+                        blocked.append(f"тяжесть {f.severity}→{new_sev}")
+                    else:
+                        changes.append(f"тяжесть {f.severity}→{new_sev}")
+                        f.severity = new_sev
+                f.judge_change = "; ".join(changes)
+                if blocked:
+                    f.judge_change = (f.judge_change + "; " if f.judge_change else "") + \
+                        "не принято (доказанное противоречие): " + ", ".join(blocked)
             kept = []
             for f in merged:
                 if f.judge == "rejected":
@@ -468,7 +489,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
     kind_by_rid = {r.rid: r.kind for r in reqs}
     for f in merged:
         kinds = {kind_by_rid.get(r) for r in f.rids}
-        if (f.category == "contradiction" and f.proof == "Д" and f.judge in ("confirmed", "")
+        if (f.category == "contradiction" and f.proof == "Д" and f.judge in ("confirmed", "disputed", "")
                 and kinds & {"FR", "AC"} and len({q.line_start for q in f.quotes}) >= 2
                 and (kinds & {"FR"}) and f.severity != "blocker"):
             f.severity = "blocker"

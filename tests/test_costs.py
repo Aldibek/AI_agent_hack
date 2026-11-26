@@ -515,6 +515,48 @@ class PipelineCostsTest(CostsBase):
         self.assertIn("| Режим | правила + LLM-консилиум (3/3 проходов) + оркестратор + судья |", text)
 
 
+class JudgeProtectionTest(CostsBase):
+    """Судья не может понизить доказанное противоречие в ФТ — только отклонить с обоснованием."""
+
+    SPEC = "# ТЗ\n\n## Функциональные требования\nФ-1. Не более одного push в месяц.\nФ-2. При новом пороге отправить push.\n"
+
+    def _run(self, verdict: str):
+        from reqaudit import pipeline
+        from reqaudit.models import Finding, Quote
+
+        spec = Path(self.tmp.name) / "s.md"
+        spec.write_text(self.SPEC, encoding="utf-8")
+
+        def answer(kw):
+            sys_txt = kw.get("system", "")
+            if "независимый судья" in sys_txt:
+                return json.dumps({"verdicts": [{"id": "F-01", "verdict": verdict, "proof": "У", "severity": "major",
+                                                 "note": "строка 5"}]}, ensure_ascii=False)
+            if "оркестр" in sys_txt.lower() or "объединённые находки" in sys_txt:
+                return '{"findings": []}'
+            return json.dumps({"findings": [{"category": "contradiction", "severity": "blocker", "proof": "Д",
+                                             "title": "Лимит push против push при новом пороге",
+                                             "quotes": [{"text": "Не более одного push в месяц."},
+                                                        {"text": "При новом пороге отправить push."}]}]},
+                              ensure_ascii=False)
+
+        sdk = FakeSDK(text=answer)
+        env = {"ANTHROPIC_API_KEY": "k", "REQAUDIT_REVIEWERS": "anthropic", "ANTHROPIC_FOCUS": "0",
+               "REQAUDIT_JUDGE": "anthropic", "REQAUDIT_JUDGE_MODEL": "claude-sonnet-5-5"}
+        with mock.patch.dict(os.environ, env), mock.patch("anthropic.Anthropic", return_value=sdk):
+            return pipeline.run(str(spec), use_llm=True, cache_dir=None)
+
+    def test_disputed_cannot_downgrade_proven_contradiction(self):
+        res = self._run("disputed")
+        f = next(f for f in res.findings if f.category == "contradiction")
+        self.assertEqual((f.severity, f.proof), ("blocker", "Д"))
+        self.assertIn("не принято", f.judge_change)
+
+    def test_rejected_is_allowed(self):
+        res = self._run("rejected")
+        self.assertFalse([f for f in res.findings if f.category == "contradiction" and not f.is_rule])
+
+
 class RoleModelTest(unittest.TestCase):
     def test_role_model_not_applied_to_other_provider(self):
         from reqaudit.llm import LLMClient

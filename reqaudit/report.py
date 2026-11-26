@@ -130,6 +130,8 @@ def finding_block(f: Finding, by_id: dict[str, Requirement], total_reviewers: in
     meta = f"**Кто нашёл:** {_votes_str(f, total_reviewers)} · **Судья:** {JUDGE_RU.get(f.judge, f.judge)}"
     if f.judge_note:
         meta += f" — {f.judge_note}"
+    if f.judge_change:
+        meta += f" _(изменения судьи: {f.judge_change})_"
     out.append(meta)
     if f.status_note:
         out.append(f"\n_Примечание: {f.status_note.strip()}_")

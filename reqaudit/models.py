@@ -93,6 +93,7 @@ class Finding(BaseModel):
     votes: list[str] = Field(default_factory=list)  # кто нашёл (источники)
     judge: str = ""  # confirmed | disputed | rejected | ""
     judge_note: str = ""
+    judge_change: str = ""  # что судья изменил: «тяжесть blocker→major», «доказанность Д→У»; или что изменить ему не дали
     status_note: str = ""  # служебные пометки (понижено, найдено одной моделью и т.п.)
 
     def lines(self) -> set[int]:
