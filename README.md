@@ -97,6 +97,21 @@ python -m reqaudit ../ai-requirements-validator-task/docs/requirements.pdf repor
 | `--reviewers alem,gemini` · `--judge groq` | явный выбор ролей |
 | `--no-cache` | не использовать кэш ответов LLM (по умолчанию повторный прогон берёт ответы из `.reqaudit_cache/`) |
 
+### Сценарий демо
+
+```bash
+# 1) мгновенно, без ключа: только правила
+python -m reqaudit ../ai-requirements-validator-task/docs/requirements.md reports/rules.md --no-llm
+# 2) полный прогон: консилиум, оркестратор, судья (~7 мин; повторный запуск берёт ответы из кэша)
+python -m reqaudit ../ai-requirements-validator-task/docs/requirements.md reports/report.md
+# 3) человек в контуре: ответить на главные вопросы и получить исправленные формулировки (ТЗ v2)
+python -m reqaudit ../ai-requirements-validator-task/docs/requirements.md reports/report.md --interactive
+```
+
+Повторяемость: при `temperature=0` и одинаковом входе повторный прогон берёт ответы моделей из кэша
+(`.reqaudit_cache/`) и даёт идентичный отчёт; `--no-cache` — честный новый прогон. Тяжесть подтверждённых противоречий
+в ФТ калибруется правилом, поэтому вердикт не «плавает» между прогонами.
+
 ## Состав отчёта
 
 1. Паспорт прогона: документ, дата, модели, версия агента (коммит), вызовы LLM.
