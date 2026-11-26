@@ -55,8 +55,14 @@ def main(argv: list[str] | None = None) -> int:
     write_source(result, out.with_suffix(".source.txt"))
     from .report_html import render_html
 
+    try:  # PDF — до HTML, чтобы HTML мог встроить его в кнопку «Скачать PDF»
+        from .report_pdf import render_pdf
+
+        render_pdf(result, out.with_suffix(".pdf"))
+    except Exception as e:  # noqa: BLE001 — PDF вспомогательный, отчёт .md уже записан
+        print(f"Внимание: PDF не создан ({e})", file=sys.stderr)
     render_html(result, out.with_suffix(".html"))
-    print(f"Отчёт: {out} (наглядная версия: {out.with_suffix('.html')})", file=sys.stderr)
+    print(f"Отчёт: {out} (также .pdf и .html рядом)", file=sys.stderr)
     print(f"Трассировка: {out.with_suffix('.json')}; текст документа с номерами строк: {out.with_suffix('.source.txt')}",
           file=sys.stderr)
     if result.budget_stop:

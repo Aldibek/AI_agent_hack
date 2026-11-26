@@ -80,7 +80,8 @@ python -m reqaudit docs/requirements.pdf reports/report.md
 
 Результаты:
 - `reports/report.md` — **отчёт** на русском;
-- `reports/report.html` — наглядная версия: документ с подсветкой проблемных строк и карточки замечаний;
+- `reports/report.html` — заключение для чтения в браузере (с кнопками скачивания MD / PDF / HTML);
+- `reports/report.pdf` — то же заключение в PDF;
 - `reports/report.json` — трассировка: все находки, отклонённые критиком, модели, вызовы, расходы;
 - `reports/report.source.txt` — текст документа с номерами строк, на которые ссылается отчёт.
 
@@ -91,15 +92,26 @@ python -m reqaudit docs/requirements.pdf reports/report.md
 | `--no-cache` | честный новый прогон; без флага повторный прогон берёт ответы моделей из `.reqaudit_cache/` и даёт тот же отчёт |
 | `--force-budget` | начать, даже если оценка стоимости выше лимита |
 
-### Веб-интерфейс (по желанию)
+### Веб-приложение
 
 ```bash
-python -m reqaudit.web          # откройте http://127.0.0.1:8000
+streamlit run streamlit_app.py      # откроется http://localhost:8501
 ```
 
-Перетащите PDF, DOCX, MD или TXT — агент проверит документ (тот же конвейер, что из командной строки) и покажет
-заключение со скачиванием в Markdown, PDF и HTML. Галочка «Быстро, без модели» — только правила, бесплатно.
-Сервер слушает только этот компьютер; результаты сохраняются в `reports/web/`.
+Загрузите PDF (в том числе скан), DOCX, MD или TXT → «Проверить» → заключение прямо на странице и кнопки
+**Markdown · PDF · HTML · JSON**. Вкладка «Пример» мгновенно показывает готовое заключение по документу хакатона.
+Режим «Быстрая» — только правила, без ключа и бесплатно.
+
+**Публикация в Streamlit Community Cloud** (чтобы дать жюри ссылку): share.streamlit.io → New app → этот репозиторий,
+файл `streamlit_app.py`, Python 3.11+. В *Settings → Secrets*:
+
+```toml
+ANTHROPIC_API_KEY = "sk-ant-..."
+APP_PASSWORD = "код-для-жюри"   # полная (платная) проверка только по коду; быстрая — всем
+REQAUDIT_DAILY_BUDGET_USD = "10"
+```
+
+Системные пакеты для распознавания сканов (`tesseract-ocr`, языки rus/kaz) перечислены в `packages.txt`.
 
 ## Состав отчёта
 
@@ -179,8 +191,10 @@ reqaudit/
   clarify.py     человек в контуре (--interactive)
   verdict.py     вердикт по правилу
   costs.py       учёт расходов и лимиты; python -m reqaudit.costs
+  report_pdf.py  PDF-версия заключения (PyMuPDF, без браузера)
   report.py      отчёт Markdown и трассировка
   report_html.py наглядный HTML-отчёт
+streamlit_app.py веб-приложение: загрузить документ → заключение → скачать
 docs/            задание хакатона и проверяемый документ (requirements.md / .pdf)
 eval/            эталон, скрипт оценки, второй документ
 submission/      отчёт для сдачи

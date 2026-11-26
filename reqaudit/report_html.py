@@ -105,7 +105,11 @@ JS = r"""
   const base=document.body.dataset.base||'report', md=document.getElementById('md-src');
   document.getElementById('dl-md').onclick=()=>save(base+'.md',md?JSON.parse(md.textContent):'','text/markdown;charset=utf-8');
   document.getElementById('dl-html').onclick=()=>save(base+'.html','<!doctype html>\n'+document.documentElement.outerHTML,'text/html;charset=utf-8');
+  const pdf=document.getElementById('pdf-src');
   document.getElementById('dl-pdf').onclick=()=>{
+    if(pdf){const b=atob(pdf.textContent.trim()),u=new Uint8Array(b.length);for(let i=0;i<b.length;i++)u[i]=b.charCodeAt(i);
+      const blob=new Blob([u],{type:'application/pdf'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+      a.download=base+'.pdf';document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},500);return;}
     const ds=[...document.querySelectorAll('details')], was=ds.map(d=>d.open);
     ds.forEach(d=>d.open=true); window.print(); ds.forEach((d,i)=>d.open=was[i]);};
 })();
@@ -155,6 +159,12 @@ def render_html(result: RunResult, out_path: Path) -> None:
     title = next((ln.text.lstrip("# ").strip() for ln in doc.lines if ln.text.startswith("# ")), doc.name)
     md_path = out_path.with_suffix(".md")
     md_text = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
+    pdf_path = out_path.with_suffix(".pdf")
+    pdf_b64 = ""
+    if pdf_path.exists() and pdf_path.stat().st_size < 3_000_000:
+        import base64
+
+        pdf_b64 = base64.b64encode(pdf_path.read_bytes()).decode("ascii")
     when = result.finished_at or datetime.now().strftime("%d.%m.%Y %H:%M")
 
     dev, test = v["dev"][0], v["test"][0]
@@ -280,9 +290,11 @@ def render_html(result: RunResult, out_path: Path) -> None:
     # скачать
     P.append("<h2 class='noprint'>Скачать</h2><div class='dl'>"
              "<button id='dl-md'>Markdown</button><button id='dl-pdf'>PDF</button><button id='dl-html'>HTML</button></div>"
-             "<p class='fine noprint'>PDF сохраняется через печать браузера: «Сохранить как PDF».</p>"
-             "<p class='fine'>Отчёт сформирован агентом ReqAudit автоматически.</p></article>")
+             + ("" if pdf_b64 else "<p class='fine noprint'>PDF сохраняется через печать браузера: «Сохранить как PDF».</p>")
+             + "<p class='fine'>Отчёт сформирован агентом ReqAudit автоматически.</p></article>")
     # JSON внутри <script> не декодирует HTML-сущности, поэтому Markdown скачается байт в байт
     P.append("<script type='application/json' id='md-src'>" + json.dumps(md_text).replace("</", "<\\/") + "</script>")
+    if pdf_b64:
+        P.append(f"<script type='text/plain' id='pdf-src'>{pdf_b64}</script>")
     P.append(f"<script>{JS}</script></body></html>")
     out_path.write_text("".join(P), encoding="utf-8")

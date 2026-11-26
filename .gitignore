@@ -19,3 +19,6 @@ reports/
 .idea/
 .vscode/
 .reqaudit_failed/
+
+# Streamlit: секреты не коммитим
+.streamlit/secrets.toml
