@@ -6,3 +6,7 @@ maxUploadSize = 25
 
 [browser]
 gatherUsageStats = false
+
+[client]
+# без кнопки Deploy и меню разработчика в правом верхнем углу
+toolbarMode = "minimal"
