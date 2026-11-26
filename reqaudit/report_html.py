@@ -95,9 +95,9 @@ def render_html(result: RunResult, out_path: Path) -> None:
             ids = ",".join(dict.fromkeys(f.fid for f in fs))
             tip = " | ".join(f"{f.fid}: {f.title}" for f in fs[:4])
             parts.append(f"<div class='ln s-{fs[0].severity}' id='L{ln.n}' data-f='{ids}' title='{e(tip)}'>"
-                         f"<span class='no'>{ln.n}</span><span>{e(ln.text) or ' '}</span></div>")
+                         f"<span class='no'>{ln.n}</span><span>{e(ln.text.replace('**', '')) or ' '}</span></div>")
         else:
-            parts.append(f"<div class='ln' id='L{ln.n}'><span class='no'>{ln.n}</span><span>{e(ln.text) or ' '}</span></div>")
+            parts.append(f"<div class='ln' id='L{ln.n}'><span class='no'>{ln.n}</span><span>{e(ln.text.replace('**', '')) or ' '}</span></div>")
     parts.append("</section><section class='list'><div class='filters'>"
                  "<button class='on' data-k='all'>Все</button><button data-k='blocker'>Блокеры</button>"
                  "<button data-k='major'>Существенные</button><button data-k='minor'>Незначительные</button>"

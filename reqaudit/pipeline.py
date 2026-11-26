@@ -387,6 +387,18 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
             result.failures.append(f"Судья недоступен: {str(e)[:200]} — находки не перепроверены.")
             log(f"  судья упал: {str(e)[:160]}")
 
+    # Детерминированная калибровка тяжести: подтверждённое противоречие в ключевой логике (ФТ / критерии приёмки)
+    # по определению блокирует разработку — не даём модели «плавать» между прогонами.
+    kind_by_rid = {r.rid: r.kind for r in reqs}
+    for f in merged:
+        kinds = {kind_by_rid.get(r) for r in f.rids}
+        if (f.category == "contradiction" and f.proof == "Д" and f.judge in ("confirmed", "")
+                and kinds & {"FR", "AC"} and len({q.line_start for q in f.quotes}) >= 2
+                and (kinds & {"FR"}) and f.severity != "blocker"):
+            f.severity = "blocker"
+            f.status_note = (f.status_note + " " if f.status_note else "") + \
+                "Тяжесть повышена до блокера правилом: подтверждённое противоречие в функциональных требованиях."
+
     merged.sort(key=_sort_key)
     for i, f in enumerate(merged, start=1):
         f.fid = f"F-{i:02d}"
