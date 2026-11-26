@@ -93,6 +93,8 @@ class Finding(BaseModel):
     votes: list[str] = Field(default_factory=list)  # кто нашёл (источники)
     judge: str = ""  # confirmed | disputed | rejected | ""
     judge_note: str = ""
+    origins: list[str] = Field(default_factory=list)  # «проход#номер» исходных находок, вошедших в эту (после склеек)
+    src_index: int = 0  # порядковый номер находки в ответе своего прохода (для покрытия по требованиям)
     judge_change: str = ""  # что судья изменил: «тяжесть blocker→major», «доказанность Д→У»; или что изменить ему не дали
     status_note: str = ""  # служебные пометки (понижено, найдено одной моделью и т.п.)
 

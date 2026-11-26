@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -27,7 +28,8 @@ CATEGORY_ORDER = ["contradiction", "incorrect", "unverifiable", "incompleteness"
                   "non_singular", "terminology", "design", "traceability", "template", "other"]
 FAMILY = {"contradiction": "conflict", "incorrect": "conflict", "incompleteness": "gap", "security": "gap",
           "ambiguity": "vague", "unverifiable": "vague", "loophole": "vague", "terminology": "vague",
-          "template": "template", "traceability": "template", "design": "design", "non_singular": "design"}
+          "template": "template", "traceability": "template", "design": "design", "non_singular": "design",
+          "feasibility": "gap", "modifiability": "design", "ranked": "template"}
 VALID_CATEGORIES = set(FAMILY) | {"other"}
 
 
@@ -50,6 +52,7 @@ class RunResult(BaseModel):
     costs: dict = Field(default_factory=dict)  # учёт расходов (reqaudit.costs.CostTracker.summary)
     budget_stop: str = ""  # причина остановки по бюджету (пусто — бюджет не исчерпан)
     budget_blocked: list[str] = Field(default_factory=list)  # отдельные вызовы, не поместившиеся в бюджет прогона
+    coverage: dict[str, dict] = Field(default_factory=dict)  # R-xx → {"status": ok|defect|unchecked, "note": ...}
     steps: dict[str, str] = Field(default_factory=dict)  # шаг → ok | budget | error | skipped (для честного «Режима»)
 
 
@@ -67,7 +70,7 @@ def req_table(reqs: list[Requirement]) -> str:
 
 def _to_findings(data: dict, label: str) -> list[Finding]:
     out = []
-    for raw in data.get("findings") or []:
+    for n, raw in enumerate(data.get("findings") or [], start=1):
         if not isinstance(raw, dict):
             continue
         cat = str(raw.get("category") or "other").strip().lower()
@@ -100,7 +103,8 @@ def _to_findings(data: dict, label: str) -> list[Finding]:
             explanation=str(raw.get("explanation") or "").strip(), scenario=str(raw.get("scenario") or "").strip(),
             impact=str(raw.get("impact") or "").strip(), suggestion=str(raw.get("suggestion") or "").strip(),
             question=question, roles=[str(x) for x in (raw.get("roles") or [])][:5],
-            search_scope=str(raw.get("search_scope") or "").strip(), votes=[label],
+            search_scope=str(raw.get("search_scope") or "").strip(), votes=[label], src_index=n,
+            origins=[f"{label}#{n}"],
         ))
     return out
 
@@ -161,9 +165,8 @@ def merge_findings(findings: list[Finding]) -> list[Finding]:
                 if v not in votes:
                     votes.append(v)
         rep.votes = votes
-        if len(members) > 1:
-            rep.severity = min((m.severity for m in members), key=lambda s: SEVERITY_ORDER[s]) \
-                if len(set(votes)) >= 2 else rep.severity
+        rep.origins = list(dict.fromkeys(o for m in members for o in m.origins))
+        if len(members) > 1:  # тяжесть за число голосов не поднимаем: её заново оценивает критик
             seen = {(q.line_start, normalize(q.text)) for q in rep.quotes}
             for m in members:
                 for q in m.quotes:
@@ -304,12 +307,16 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
                                  f"с --force-budget.", limit_usd=tracker.run_limit, preflight=True)
         log(f"консилиум: {', '.join(t[2] for t in tasks)} (параллельно)")
 
+        raw_cov: dict[str, list] = {}  # покрытие по требованиям от прохода 0: метка прохода → тройки
+
         def review(task):
             client, variant, label = task
             started = time.time()
             data = client.chat_json(prompts.reviewer_system(variant), user, max_tokens=64000,
                                     deadline=float(os.getenv("REQAUDIT_REVIEW_DEADLINE", "480")), role="reviewer")
             fs = _to_findings(data, label)
+            if variant == 0 and isinstance(data.get("coverage"), list):
+                raw_cov[label] = data["coverage"]
             log(f"  ревьюер {label}: {len(fs)} находок за {time.time() - started:.0f} с")
             return fs
 
@@ -330,6 +337,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
         ok_rev = len(tasks) - sum(1 for x in result.failures if x.startswith("Ревьюер ")) \
             - sum(1 for x in result.budget_blocked if x.startswith("Ревьюер "))
         result.steps["reviewers"] = f"{max(ok_rev, 0)}/{len(tasks)}"
+        result.coverage = {"_raw": raw_cov}
         log(f"проверка цитат: подтверждено {len(all_findings)}, отброшено {len(result.dropped_ungrounded)}")
 
     merged = merge_findings(all_findings)
@@ -378,6 +386,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
                         if vote not in tgt.votes:
                             tgt.votes.append(vote)
                     tgt.rids = sorted(set(tgt.rids) | set(f.rids))
+                    tgt.origins = list(dict.fromkeys(tgt.origins + f.origins))
                     seen_q = {(q.line_start, normalize(q.text)) for q in tgt.quotes}
                     for q in f.quotes:
                         if (q.line_start, normalize(q.text)) not in seen_q and len(tgt.quotes) < 5:
@@ -392,6 +401,9 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
                 verdict = str(v.get("verdict") or "").lower()
                 f.judge = verdict if verdict in ("confirmed", "disputed", "rejected") else ""
                 f.judge_note = str(v.get("note") or "")[:300]
+                _apply_patch(f, v.get("patch"))
+                cites_line = any(1 <= int(n) <= len(doc.lines) for n in
+                                 re.findall(r"стр(?:ок\w*|\.)?\s*(\d+)", f.judge_note, flags=re.I))
                 new_proof = str(v.get("proof") or "")
                 new_sev = str(v.get("severity") or "")
                 # Доказанное противоречие в ФТ / критериях приёмки (≥2 несовместимые цитаты) судья может только
@@ -401,14 +413,14 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
                              and bool({kinds_of.get(r) for r in f.rids} & {"FR", "AC"}))
                 changes, blocked = [], []
                 if new_proof in ("Д", "У", "Ш") and new_proof != f.proof:
-                    if (f.is_rule and f.proof == "Д") or (protected and f.judge != "rejected"):
+                    if (f.is_rule and f.proof == "Д") or (protected and f.judge != "rejected" and not cites_line):
                         blocked.append(f"доказанность {f.proof}→{new_proof}")
                     else:
                         changes.append(f"доказанность {f.proof}→{new_proof}")
                         f.proof = new_proof
                 if new_sev in SEVERITY_ORDER and new_sev != f.severity:
                     down = SEVERITY_ORDER[new_sev] > SEVERITY_ORDER[f.severity]
-                    if protected and down and f.judge != "rejected":
+                    if protected and down and f.judge != "rejected" and not cites_line:
                         blocked.append(f"тяжесть {f.severity}→{new_sev}")
                     else:
                         changes.append(f"тяжесть {f.severity}→{new_sev}")
@@ -416,7 +428,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
                 f.judge_change = "; ".join(changes)
                 if blocked:
                     f.judge_change = (f.judge_change + "; " if f.judge_change else "") + \
-                        "не принято (доказанное противоречие): " + ", ".join(blocked)
+                        "не принято без ссылки на строку (доказанное противоречие): " + ", ".join(blocked)
             merged = [f for cid, f in ids.items() if cid not in dup]
             prio_objs = [ids[str(x)] for x in (data.get("priority") or []) if str(x) in ids and str(x) not in dup]
             if dup:
@@ -440,12 +452,12 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
     kind_by_rid = {r.rid: r.kind for r in reqs}
     for f in merged:
         kinds = {kind_by_rid.get(r) for r in f.rids}
-        if (f.category == "contradiction" and f.proof == "Д" and f.judge in ("confirmed", "disputed", "")
+        if (f.category == "contradiction" and f.proof == "Д" and not f.judge
                 and kinds & {"FR", "AC"} and len({q.line_start for q in f.quotes}) >= 2
                 and (kinds & {"FR"}) and f.severity != "blocker"):
             f.severity = "blocker"
             f.status_note = (f.status_note + " " if f.status_note else "") + \
-                "Тяжесть повышена до блокера правилом: подтверждённое противоречие в функциональных требованиях."
+                "Тяжесть повышена до блокера правилом: противоречие в функциональных требованиях, критик его не проверял."
 
     merged.sort(key=_sort_key)
     for i, f in enumerate(merged, start=1):
@@ -453,6 +465,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
     result.findings = merged
     alive = {id(f) for f in merged}
     result.priority = [f.fid for f in prio_objs if id(f) in alive]
+    result.coverage = build_coverage(reqs, merged, result)
     for f in merged:  # временные номера C-xx в текстах → итоговые F-xx
         for fld in ("explanation", "scenario", "impact", "suggestion", "status_note", "judge_note"):
             val = getattr(f, fld, "")
@@ -467,6 +480,95 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
         log(f"стоимость прогона: {costs.passport_line(result.costs)}")
     log(f"готово: {len(merged)} находок, вызовов LLM: {stats.llm_calls} (кэш: {stats.llm_cached}), {stats.seconds:.0f} с")
     return result
+
+
+COV_OK = {1: "условия и результат определены", 2: "тип и ограничения определены", 3: "назначение и связи ясны"}
+COV_SKIP = {1: "не хватает контекста", 2: "не удалось разобрать текст", 3: "проверка не завершена"}
+
+
+def build_coverage(reqs, findings: list[Finding], result: RunResult) -> dict[str, dict]:
+    """Честный статус по каждому требованию: «дефект» / «проверено, дефектов нет» / «не проверено».
+
+    Источник — тройки [числовая часть R-xx, статус, основание] от прохода 0. Требование без корректной записи
+    считается непроверенным: отсутствие замечаний само по себе ничего не доказывает.
+    """
+    raw = (result.coverage or {}).get("_raw") or {}
+    known = {r.rid for r in reqs}
+    by_rid: dict[str, list[Finding]] = {}
+    for f in findings:
+        for rid in f.rids:
+            by_rid.setdefault(rid, []).append(f)
+    live_by_origin = {o: f for f in findings for o in f.origins}
+    rejected_origins = {o for f in result.rejected for o in f.origins}
+    entries: dict[str, tuple[int, int, str]] = {}
+    bad: set[str] = set()
+    for label, triples in raw.items():
+        for t in triples if isinstance(triples, list) else []:
+            if not (isinstance(t, list) and len(t) == 3 and all(type(x) is int for x in t)):
+                continue  # не тройка целых чисел — игнорируем, требование останется «не проверено»
+            rid, status, reason = f"R-{t[0]:02d}", t[1], t[2]
+            if rid not in known or status not in (0, 1, 2):
+                continue
+            if (status == 0 and reason not in COV_OK) or (status == 2 and reason not in COV_SKIP) or \
+                    (status == 1 and reason < 1):
+                bad.add(rid)
+                continue
+            if rid in entries:  # повторная запись об одном требовании — не доверяем ни одной
+                bad.add(rid)
+                continue
+            entries[rid] = (status, reason, label)
+    out: dict[str, dict] = {}
+    for r in reqs:
+        live = by_rid.get(r.rid, [])
+        if live:
+            out[r.rid] = {"status": "defect", "note": ", ".join(f.fid for f in live)}
+            continue
+        e = None if r.rid in bad else entries.get(r.rid)
+        if e is None:
+            why = "только правила, без модели" if result.mode == "rules-only" else \
+                ("проход покрытия не выполнен" if not raw else
+                 ("некорректная запись о проверке в ответе модели" if r.rid in bad else "нет в ответе модели"))
+            out[r.rid] = {"status": "unchecked", "note": why}
+        elif e[0] == 0:
+            out[r.rid] = {"status": "ok", "note": COV_OK[e[1]]}
+        elif e[0] == 1:
+            key = f"{e[2]}#{e[1]}"
+            if key in live_by_origin:  # замечание живо, но после склейки привязано к другим требованиям
+                out[r.rid] = {"status": "defect", "note": live_by_origin[key].fid}
+            elif key in rejected_origins:
+                out[r.rid] = {"status": "ok", "note": "оценено; единственное замечание проверено и снято критиком"}
+            else:
+                out[r.rid] = {"status": "unchecked",
+                              "note": "замечание модели не прошло проверку цитат — нужна повторная проверка"}
+        else:
+            out[r.rid] = {"status": "unchecked", "note": COV_SKIP[e[1]]}
+    return out
+
+
+def _apply_patch(f: Finding, patch) -> None:
+    """Минимальная правка полей от критика: убрать неподтверждённое утверждение, поправить вопрос."""
+    if not isinstance(patch, dict) or not patch:
+        return
+    changed = []
+    for fld in ("title", "explanation", "impact", "suggestion"):
+        val = patch.get(fld)
+        if isinstance(val, str) and val.strip() and val.strip() != getattr(f, fld):
+            setattr(f, fld, val.strip())
+            changed.append(fld)
+    sc = patch.get("scenario")
+    if isinstance(sc, str) and sc.strip() != f.scenario:
+        if not ("Разработчик А" in f.scenario and sc.strip() and "Разработчик А" not in sc):
+            f.scenario = sc.strip()  # пустая строка — убрать неподтверждённый сценарий
+            changed.append("scenario")
+    q = patch.get("question")
+    if isinstance(q, dict) and isinstance(q.get("text"), str):
+        opts = q.get("options")
+        opts = [o.strip() for o in opts if isinstance(o, str) and o.strip()][:4] if isinstance(opts, list) else []
+        addressee = q.get("addressee") if isinstance(q.get("addressee"), str) else (f.question.addressee if f.question else "")
+        f.question = Question(text=q["text"].strip(), options=opts, addressee=addressee) if q["text"].strip() else None
+        changed.append("question")
+    if changed:
+        f.status_note = (f.status_note + " " if f.status_note else "") + f"Текст уточнён критиком: {', '.join(changed)}."
 
 
 def _remap_prose(text: str, alive: set[int], ids: dict[str, Finding], dup_map: dict[str, str]) -> str:

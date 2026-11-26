@@ -105,11 +105,12 @@ def _units(doc: Document):
             yield (i + 1, j, text, "list", {"num": m.group(1)})
             i = j
             continue
-        # абзац: подряд идущие строки; строка, начинающаяся с **, начинает новый абзац
+        # абзац: подряд идущие строки; строка, начинающаяся с ** или с идентификатора требования, начинает новый абзац
         j = i + 1
         while j < n:
             nt = lines[j].text.strip()
-            if not nt or nt.startswith(("#", "|", "```", "**")) or LIST_RE.match(lines[j].text) or nt == "---":
+            if not nt or nt.startswith(("#", "|", "```", "**")) or LIST_RE.match(lines[j].text) or nt == "---" \
+                    or ID_RE.match(nt):  # строка с собственным идентификатором (Ф-2, FR-3…) — новое требование
                 break
             j += 1
         text = " ".join(l.text.strip() for l in lines[i:j])

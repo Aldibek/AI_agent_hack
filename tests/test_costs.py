@@ -514,7 +514,7 @@ class JudgeProtectionTest(CostsBase):
 
     SPEC = "# ТЗ\n\n## Функциональные требования\nФ-1. Не более одного push в месяц.\nФ-2. При новом пороге отправить push.\n"
 
-    def _run(self, verdict: str):
+    def _run(self, verdict: str, note: str = "условия разные"):
         from reqaudit import pipeline
         from reqaudit.models import Finding, Quote
 
@@ -525,7 +525,7 @@ class JudgeProtectionTest(CostsBase):
             sys_txt = kw.get("system", "")
             if "Ты — критик" in sys_txt:
                 return json.dumps({"verdicts": [{"id": f"C-{n:02d}", "verdict": verdict, "proof": "У",
-                                                 "severity": "major", "note": "строка 5"} for n in range(1, 10)],
+                                                 "severity": "major", "note": note} for n in range(1, 10)],
                                    "priority": ["C-01"]}, ensure_ascii=False)
             return json.dumps({"findings": [{"category": "contradiction", "severity": "blocker", "proof": "Д",
                                              "title": "Лимит push против push при новом пороге",
@@ -544,6 +544,12 @@ class JudgeProtectionTest(CostsBase):
         f = next(f for f in res.findings if f.category == "contradiction")
         self.assertEqual((f.severity, f.proof), ("blocker", "Д"))
         self.assertIn("не принято", f.judge_change)
+
+    def test_downgrade_allowed_when_critic_cites_line(self):
+        res = self._run("confirmed", note="строка 5 описывает другой случай")
+        f = next(f for f in res.findings if f.category == "contradiction")
+        self.assertEqual(f.proof, "У")
+        self.assertNotIn("не принято", f.judge_change)
 
     def test_critic_merges_duplicates(self):
         from reqaudit import pipeline
@@ -577,6 +583,54 @@ class JudgeProtectionTest(CostsBase):
     def test_rejected_is_allowed(self):
         res = self._run("rejected")
         self.assertFalse([f for f in res.findings if f.category == "contradiction" and not f.is_rule])
+
+
+class CoverageTest(CostsBase):
+    """У каждого требования явный статус; молчание модели не считается проверкой."""
+
+    SPEC = ("# ТЗ\n\n## Функциональные требования\nФ-1. Клиент задаёт порог от 1 000 до 50 000 ₸.\n"
+            "Ф-2. Система отправляет push при достижении порога.\nФ-3. Клиент может отключить уведомления.\n"
+            "Ф-4. Отчёт формируется раз в месяц.\n")
+
+    def test_statuses(self):
+        from reqaudit import pipeline
+        from reqaudit.report import render
+
+        spec = Path(self.tmp.name) / "c.md"
+        spec.write_text(self.SPEC, encoding="utf-8")
+
+        def answer(kw):
+            if "Ты — критик" in kw.get("system", ""):
+                return '{"verdicts": [], "priority": []}'
+            return json.dumps({
+                "findings": [{"category": "ambiguity", "severity": "major", "rids": ["R-02"], "title": "Когда уходит push",
+                              "quotes": [{"text": "Система отправляет push при достижении порога."}]},
+                             {"category": "ambiguity", "severity": "minor", "rids": ["R-03"], "title": "Выдуманная цитата",
+                              "quotes": [{"text": "такого текста в документе нет совсем"}]}],
+                # R-01 проверено; R-02 дефект (находка 1); R-03 дефект, но цитата не подтвердится; R-04 пропущено;
+                # [9,0,1] — чужой ID, [1.5,...] и строки — мусор
+                "coverage": [[1, 0, 1], [2, 1, 1], [3, 1, 2], [9, 0, 1], ["R-04", 0, 1], [4.0, 0, 1]]}, ensure_ascii=False)
+
+        sdk = FakeSDK(text=answer)
+        env = {"ANTHROPIC_API_KEY": "k", "REQAUDIT_REVIEWERS": "anthropic", "ANTHROPIC_FOCUS": "0", "REQAUDIT_JUDGE": "anthropic"}
+        with mock.patch.dict(os.environ, env), mock.patch("anthropic.Anthropic", return_value=sdk):
+            res = pipeline.run(str(spec), use_llm=True, cache_dir=None)
+        cov = res.coverage
+        self.assertEqual(cov["R-01"]["status"], "ok")
+        self.assertEqual(cov["R-02"]["status"], "defect")
+        self.assertEqual(cov["R-03"]["status"], "unchecked")  # замечание удалено проверкой цитат
+        self.assertEqual(cov["R-04"]["status"], "unchecked")  # записи нет (мусор не засчитан)
+        text = render(res, Path(self.tmp.name) / "c_report.md")
+        self.assertIn("не проверено — 2", text)
+        self.assertIn("Готовность установлена не полностью", text)
+
+    def test_rules_only_is_unchecked(self):
+        from reqaudit import pipeline
+
+        spec = Path(self.tmp.name) / "c2.md"
+        spec.write_text(self.SPEC, encoding="utf-8")
+        res = pipeline.run(str(spec), use_llm=False)
+        self.assertTrue(all(c["status"] in ("defect", "unchecked") for c in res.coverage.values()))
 
 
 class HumanInLoopTest(CostsBase):

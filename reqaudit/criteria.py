@@ -37,6 +37,9 @@ CATEGORY = {
     "security": ("Полнота (безопасность)", "29148 §5.2.5", "Безопасность"),
     "loophole": ("Однозначность / полнота (лазейка)", "29148 §5.2.5", "Лазейка"),
     "traceability": ("Трассируемость", "IEEE 830 §4.3.8", "Трассируемость"),
+    "feasibility": ("Выполнимость", "29148 §5.2.5–5.2.6", "Невыполнимость"),
+    "modifiability": ("Модифицируемость", "IEEE 830 §4.3.7", "Модифицируемость"),
+    "ranked": ("Ранжированность", "IEEE 830 §4.3.5", "Нет приоритетов"),
     "other": ("Качество требования", "29148 §5.2.5", "Прочее"),
 }
 
@@ -56,6 +59,9 @@ SET_MAP = {
     "ambiguity": "comprehensible",
     "incorrect": "consistent",
     "traceability": "traceable",
+    "feasibility": "feasible",
+    "modifiability": "modifiable",
+    "ranked": "ranked",
 }
 
 # какие категории относятся к какой характеристике отдельного требования
@@ -71,6 +77,7 @@ INDIVIDUAL_MAP = {
     "design": "appropriate",
     "template": "conforming",
     "terminology": "unambiguous",
+    "feasibility": "feasible",
 }
 
 

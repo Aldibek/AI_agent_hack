@@ -19,10 +19,10 @@ from .verdict import compute
 
 SEV_ICON = {"blocker": "🔴", "major": "🟠", "minor": "🟡"}
 JUDGE_RU = {"confirmed": "подтверждено", "disputed": "спорно — требует проверки аналитиком", "rejected": "отклонено", "": "не проверялось"}
-COLS = ["unambiguous", "complete", "verifiable", "consistent", "singular", "correct", "appropriate", "conforming"]
+COLS = ["unambiguous", "complete", "verifiable", "consistent", "singular", "correct", "feasible", "appropriate", "conforming"]
 COL_RU = {"unambiguous": "Однозн.", "complete": "Полнота", "verifiable": "Проверяем.", "consistent": "Непротив.",
           "singular": "Единичн.",
-          "correct": "Корректн.", "appropriate": "Уместн.", "conforming": "Шаблон"}
+          "correct": "Корректн.", "feasible": "Выполн.", "appropriate": "Уместн.", "conforming": "Шаблон"}
 
 
 def agent_version() -> str:
@@ -209,19 +209,30 @@ def render(result: RunResult, out_path: Path) -> str:
     for f in findings:
         for rid in f.rids:
             per_req[rid].append(f)
+    cov = result.coverage or {}
+    n_ok = sum(1 for r in reqs if cov.get(r.rid, {}).get("status") == "ok")
+    n_def = sum(1 for r in reqs if cov.get(r.rid, {}).get("status") == "defect")
+    n_un = len(reqs) - n_ok - n_def
     L += ["## 3. Проверка каждого требования", "",
-          "Характеристики ISO/IEC/IEEE 29148:2018 §5.2.5 и IEEE 830 §4.3. В ячейке — номера замечаний; «✓» — замечаний нет.", "",
-          "| Требование | " + " | ".join(COL_RU[c] for c in COLS) + " |", "| :--- | " + " | ".join(":---:" for _ in COLS) + " |"]
+          f"Каждое требование оценено отдельно: **с дефектами — {n_def}**, **проверено, дефектов нет — {n_ok}**, "
+          f"**не проверено — {n_un}**.", "",
+          "Характеристики ISO/IEC/IEEE 29148:2018 §5.2.5 и IEEE 830 §4.3. В ячейке — номера замечаний; «✓» — характеристика "
+          "проверена, замечаний нет; «—» — требование не проверено (отсутствие замечаний не считается проверкой).", "",
+          "| Требование | " + " | ".join(COL_RU[c] for c in COLS) + " | Итог |",
+          "| :--- | " + " | ".join(":---:" for _ in COLS) + " | :--- |"]
+    status_ru = {"ok": "✅ дефектов нет", "defect": "⚠️ дефекты", "unchecked": "❔ не проверено"}
     for r in reqs:
+        c_r = cov.get(r.rid) or {"status": "unchecked", "note": "нет данных о проверке"}
+        blank = "—" if c_r["status"] == "unchecked" else "✓"
         cells = []
         for c in COLS:
             ids = [f.fid for f in per_req.get(r.rid, []) if INDIVIDUAL_MAP.get(f.category) == c]
-            cells.append(", ".join(ids) if ids else "✓")
-        L.append(f"| {_rid_label(r.rid, by_id)} | " + " | ".join(cells) + " |")
+            cells.append(", ".join(ids) if ids else blank)
+        L.append(f"| {_rid_label(r.rid, by_id)} | " + " | ".join(cells) +
+                 f" | {status_ru[c_r['status']]}: {_esc(c_r.get('note', ''))} |")
     L.append("")
-    clean = [r.rid for r in reqs if not per_req.get(r.rid)]
-    if clean:
-        L += [f"Без замечаний: {', '.join(clean)}.", ""]
+    if n_un:
+        L += [f"⚠️ Не проверено требований: {n_un} из {len(reqs)}. По ним вывод о качестве не сделан.", ""]
     single = [f for f in findings if not is_set_level(f)]
     if single:
         L += ["### Замечания к отдельным требованиям", ""]
@@ -295,7 +306,7 @@ def render(result: RunResult, out_path: Path) -> str:
     L += ["## 6. Сводка", ""]
     kinds = Counter(KIND_RU.get(r.kind, r.kind) for r in reqs)
     L.append(f"- **Требований:** {len(reqs)} (" + ", ".join(f"{k}: {n}" for k, n in kinds.most_common()) + ").")
-    L.append(f"- **Требований с замечаниями:** {len(per_req)} из {len(reqs)}.")
+    L.append(f"- **Требований с замечаниями:** {n_def} из {len(reqs)}; проверено без дефектов: {n_ok}; не проверено: {n_un}.")
     L.append(f"- **Замечаний (нарушений):** {len(findings)}.")
     proof = Counter(f.proof for f in findings)
     L.append(f"- По доказанности: доказано текстом [Д] — {proof.get('Д', 0)}, вопросы [У] — {proof.get('У', 0)}, "
@@ -321,6 +332,9 @@ def render(result: RunResult, out_path: Path) -> str:
         if reasons:
             line += " Основания: " + ", ".join(f.fid for f in reasons[:8]) + "."
         L.append(line)
+    if n_un:
+        L.append(f"- ⚠️ **Готовность установлена не полностью:** {n_un} из {len(reqs)} требований не проверены "
+                 "(см. раздел 3) — вывод сделан только по проверенной части документа.")
     L += ["", "**Что исправить в первую очередь:**", ""]
     for i, f in enumerate(v["fix_first"], start=1):
         L.append(f"{i}. **{f.fid}** ({_lines_str(f)}) — {f.title}. {f.suggestion or ''}".rstrip())
