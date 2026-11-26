@@ -579,6 +579,69 @@ class JudgeProtectionTest(CostsBase):
         self.assertFalse([f for f in res.findings if f.category == "contradiction" and not f.is_rule])
 
 
+class HumanInLoopTest(CostsBase):
+    """Человека спрашиваем только там, где агент не уверен, и не больше 3 вопросов."""
+
+    def _result(self):
+        from reqaudit.ingest import load_document
+        from reqaudit.models import Finding, Question, Quote
+        from reqaudit.pipeline import RunResult
+
+        spec = Path(self.tmp.name) / "h.md"
+        spec.write_text("# ТЗ\n\n## Функциональные требования\nФ-1. Система быстро отправляет push.\n", encoding="utf-8")
+        doc = load_document(str(spec))
+
+        def mk(fid, sev, proof, judge="confirmed", note=""):
+            return Finding(fid=fid, source="llm:a", category="ambiguity", severity=sev, proof=proof, title=f"Тема {fid}",
+                           quotes=[Quote(text="Система быстро отправляет push.", line=4, line_start=4, grounded=True)],
+                           question=Question(text=f"Вопрос {fid}?", options=["да", "нет"]), judge=judge,
+                           status_note=note, votes=["a"])
+
+        fs = [mk("F-01", "blocker", "Д"),                      # доказано — спрашивать незачем
+              mk("F-02", "major", "У", judge="disputed"),      # критик сомневается
+              mk("F-03", "blocker", "У"),                      # блокер без ответа в документе
+              mk("F-04", "major", "У"),
+              mk("F-05", "minor", "У", note="Найдено одним ревьюером из 3."),
+              mk("F-06", "minor", "Ш")]                        # оформление — не спрашиваем
+        return RunResult(doc=doc, reqs=[], findings=fs, priority=["F-03"])
+
+    def test_only_uncertain_and_ordered(self):
+        from reqaudit.clarify import _ordered_questions
+
+        ids = [f.fid for f, _why in _ordered_questions(self._result())]
+        self.assertNotIn("F-01", ids)
+        self.assertNotIn("F-06", ids)
+        self.assertEqual(ids[:2], ["F-03", "F-02"])  # блокер из приоритета критика, затем спорное
+
+    def test_limit_three_and_answers_change_findings(self):
+        from reqaudit import clarify
+
+        res = self._result()
+        asked = []
+
+        def fake_input(_prompt=""):
+            asked.append(1)
+            return "1"
+
+        def answer(kw):
+            return json.dumps({"updates": [{"id": "F-03", "status": "resolved", "rewrite": "Push уходит за 5 с."},
+                                           {"id": "F-02", "status": "not_defect", "rewrite": "строка 4"}]},
+                              ensure_ascii=False)
+
+        sdk = FakeSDK(text=answer)
+        costs.start_run(document="h.md", stats=res.stats, log=lambda m: None)
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "k"}), \
+                mock.patch("anthropic.Anthropic", return_value=sdk), \
+                mock.patch("sys.stdin.isatty", return_value=True), mock.patch("builtins.input", fake_input):
+            clarify.apply_answers(res, cache_dir=None)
+        self.assertEqual(len(asked), 3)  # не больше трёх вопросов
+        by = {f.fid: f for f in res.findings}
+        self.assertNotIn("F-02", by)  # снято по ответу автора
+        self.assertEqual(by["F-03"].proof, "Д")  # неопределённость снята
+        self.assertEqual(by["F-03"].suggestion, "Push уходит за 5 с.")
+        self.assertEqual(len(sdk.requests), 1)  # одна перепроверка на все ответы
+
+
 class RoleModelTest(unittest.TestCase):
     def test_role_model_not_applied_to_other_provider(self):
         from reqaudit.llm import LLMClient
