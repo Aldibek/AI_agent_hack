@@ -1,9 +1,11 @@
-"""Клиент LLM: любой OpenAI-совместимый API (AlemLLM, Gemini, Groq, OpenRouter, OpenAI, Ollama).
+"""Клиенты LLM: Claude (Anthropic, официальный SDK) и любой OpenAI-совместимый API
+(AlemLLM, Gemini, Groq, OpenRouter, OpenAI, Ollama).
 
 - JSON-режим с автоматическим отключением, если провайдер его не поддерживает;
 - повторы с экспоненциальной задержкой при 429/5xx/таймаутах;
 - кэш ответов на диске (повторный прогон даёт тот же отчёт без вызовов);
-- учёт вызовов и токенов для паспорта прогона.
+- учёт вызовов и токенов для паспорта прогона;
+- учёт расходов и бюджеты (reqaudit.costs): трекер передаётся клиенту, перед вызовом проверяется бюджет.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from .models import ProviderInfo, RunStats
 
 PROVIDERS = {
     # name: (company, env key, env model, default model, env base, default base)
+    "anthropic": ("Anthropic", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "claude-opus-5-5", "ANTHROPIC_BASE_URL", ""),
     "alem": ("alem.ai (Казахстан)", "ALEM_API_KEY", "ALEM_MODEL", "alemllm", "ALEM_BASE_URL", "https://llm.alem.ai/v1"),
     "gemma": ("Google Gemma (через alem.ai)", "GEMMA_API_KEY", "GEMMA_MODEL", "gemma4", "GEMMA_BASE_URL",
               "https://llm.alem.ai/v1"),
@@ -32,7 +35,7 @@ PROVIDERS = {
     "openai": ("OpenAI", "OPENAI_API_KEY", "OPENAI_MODEL", "gpt-4o-mini", "OPENAI_BASE_URL", "https://api.openai.com/v1"),
     "ollama": ("локальная модель (Ollama)", "", "OLLAMA_MODEL", "", "OLLAMA_BASE_URL", ""),
 }
-PRIORITY = ["alem", "gemma", "gemini", "groq", "openrouter", "openai", "ollama"]
+PRIORITY = ["anthropic", "alem", "gemma", "gemini", "groq", "openrouter", "openai", "ollama"]
 
 
 class LLMError(RuntimeError):
@@ -41,8 +44,9 @@ class LLMError(RuntimeError):
 
 class LLMClient:
     def __init__(self, name: str, company: str, model: str, base_url: str, api_key: str | None,
-                 stats: RunStats, cache_dir: Path | None, timeout: float = 240.0):
+                 stats: RunStats, cache_dir: Path | None, timeout: float = 240.0, tracker=None):
         self.name = name
+        self.tracker = tracker  # reqaudit.costs.CostTracker | None
         self.company = company
         self.model = model
         url = base_url.rstrip("/")
@@ -67,6 +71,11 @@ class LLMClient:
     def label(self) -> str:
         return f"{self.name}:{self.model}"
 
+    def clone(self, model: str) -> "LLMClient":
+        """Тот же провайдер, другая модель (например, отдельная модель судьи)."""
+        return LLMClient(self.name, self.company, model, self.url, self.api_key, self.stats, self.cache_dir,
+                         self.timeout, tracker=self.tracker)
+
     # ------------------------------------------------------------------ cache
     def _cache_path(self, payload: dict) -> Path | None:
         if not self.cache_dir:
@@ -76,7 +85,7 @@ class LLMClient:
 
     # ------------------------------------------------------------------ calls
     def chat(self, messages: list[dict], temperature: float = 0.0, max_tokens: int | None = None,
-             json_mode: bool = True, deadline: float | None = None) -> str:
+             json_mode: bool = True, deadline: float | None = None, role: str = "reviewer") -> str:
         payload: dict = {"model": self.model, "messages": messages}
         if not self.no_temperature:
             payload["temperature"] = temperature
@@ -89,7 +98,11 @@ class LLMClient:
         if cache and cache.exists():
             with self._lock:
                 self.stats.llm_cached += 1
+            if self.tracker:
+                self.tracker.record(provider=self.name, model=self.model, role=role, cached=True)
             return json.loads(cache.read_text(encoding="utf-8"))["content"]
+        reserved = self.tracker.check(self.model, role, _chars(messages)) if self.tracker else 0.0
+        started = time.time()
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -107,6 +120,11 @@ class LLMClient:
                 with self._lock:
                     self.stats.prompt_tokens += int(usage.get("prompt_tokens") or 0)
                     self.stats.completion_tokens += int(usage.get("completion_tokens") or 0)
+                if self.tracker:
+                    self.tracker.record(provider=self.name, model=self.model, role=role,
+                                        input_tokens=int(usage.get("prompt_tokens") or 0),
+                                        output_tokens=int(usage.get("completion_tokens") or 0),
+                                        latency_s=time.time() - started, reserved=reserved)
                 if cache and content.strip():
                     cache.parent.mkdir(parents=True, exist_ok=True)
                     cache.write_text(json.dumps({"content": content}, ensure_ascii=False), encoding="utf-8")
@@ -138,6 +156,9 @@ class LLMClient:
                 time.sleep(delays[attempt])
         with self._lock:
             self.stats.llm_failed += 1
+        if self.tracker:
+            self.tracker.record(provider=self.name, model=self.model, role=role, latency_s=time.time() - started,
+                                ok=False, reserved=reserved, error=last_err)
         raise LLMError(f"{self.label}: {last_err}")
 
     def _post(self, body: dict, headers: dict, deadline_at: float) -> tuple[int, str, dict, str, int]:
@@ -181,16 +202,26 @@ class LLMClient:
             return 0, "", {}, f"{type(e).__name__}: {e}", 0
 
     def chat_json(self, system: str, user: str, temperature: float = 0.0, max_tokens: int | None = None,
-                  deadline: float | None = None) -> dict:
-        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-        content = self.chat(messages, temperature=temperature, max_tokens=max_tokens, deadline=deadline)
-        try:
-            return parse_json(content)
-        except ValueError:
-            messages += [{"role": "assistant", "content": content[:4000]},
-                         {"role": "user", "content": "Ответ не является валидным JSON. Верни тот же ответ строго одним JSON-объектом, без пояснений и markdown."}]
-            content = self.chat(messages, temperature=0.0, max_tokens=max_tokens)
-            return parse_json(content)
+                  deadline: float | None = None, role: str = "reviewer") -> dict:
+        return _chat_json(self, system, user, temperature, max_tokens, deadline, role)
+
+
+def _chat_json(client, system: str, user: str, temperature: float, max_tokens: int | None,
+               deadline: float | None, role: str) -> dict:
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    content = client.chat(messages, temperature=temperature, max_tokens=max_tokens, deadline=deadline, role=role)
+    try:
+        return parse_json(content)
+    except ValueError:
+        messages += [{"role": "assistant", "content": content[:4000]},
+                     {"role": "user", "content": "Ответ не является валидным JSON. Верни тот же ответ строго одним JSON-объектом, без пояснений и markdown."}]
+        content = client.chat(messages, temperature=0.0, max_tokens=max_tokens, role=role)
+        return parse_json(content)
+
+
+def _chars(messages: list[dict]) -> int:
+    return sum(len(m.get("content") or "") if isinstance(m.get("content"), str) else len(json.dumps(m.get("content"),
+               ensure_ascii=False)) for m in messages)
 
 
 def _extract_content(data: dict) -> str:
@@ -230,8 +261,199 @@ def parse_json(text: str) -> dict:
     raise ValueError("JSON not found in response")
 
 
-def available_clients(stats: RunStats, cache_dir: Path | None) -> dict[str, LLMClient]:
-    clients: dict[str, LLMClient] = {}
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+ANTHROPIC_MAX_TOKENS = 64000
+FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+
+class AnthropicClient:
+    """Claude через официальный SDK `anthropic`: потоковый вызов, effort, server-side fallback при отказе.
+
+    Интерфейс совпадает с LLMClient: chat(), chat_json(), info, label, тот же дисковый кэш и учёт в RunStats.
+    temperature/top_p/top_k и thinking не передаются (на текущих моделях это 400) — глубину задаёт effort.
+    """
+
+    def __init__(self, name: str, company: str, model: str, api_key: str | None, stats: RunStats,
+                 cache_dir: Path | None, timeout: float = 240.0, tracker=None, base_url: str | None = None,
+                 sdk=None):
+        self.name = name
+        self.company = company
+        self.model = model
+        self.api_key = api_key
+        self.base_url = base_url
+        self.url = base_url or "https://api.anthropic.com/v1/messages"
+        self.stats = stats
+        self.cache_dir = cache_dir
+        self.timeout = timeout
+        self.tracker = tracker
+        self.reasoning_effort = os.getenv("ANTHROPIC_EFFORT", "").strip() or "high"
+        self.fallback = os.getenv("ANTHROPIC_FALLBACK", "1").strip() != "0"
+        self._lock = threading.Lock()
+        self._sdk = sdk
+
+    @property
+    def sdk(self):
+        if self._sdk is None:
+            import anthropic
+
+            kw = {"api_key": self.api_key, "max_retries": int(os.getenv("ANTHROPIC_MAX_RETRIES", "2")),
+                  "timeout": anthropic.Timeout(self.timeout, connect=30.0, read=180.0)}
+            if self.base_url:
+                kw["base_url"] = self.base_url
+            self._sdk = anthropic.Anthropic(**kw)
+        return self._sdk
+
+    @property
+    def info(self) -> ProviderInfo:
+        return ProviderInfo(name=self.name, company=self.company, model=self.model, base_url=self.url)
+
+    @property
+    def label(self) -> str:
+        return f"{self.name}:{self.model}"
+
+    def clone(self, model: str) -> "AnthropicClient":
+        c = AnthropicClient(self.name, self.company, model, self.api_key, self.stats, self.cache_dir, self.timeout,
+                            tracker=self.tracker, base_url=self.base_url, sdk=self._sdk)
+        c.reasoning_effort, c.fallback = self.reasoning_effort, self.fallback
+        return c
+
+    def _effort(self) -> str:
+        e = (self.reasoning_effort or "high").strip().lower()
+        if e not in EFFORTS:
+            with self._lock:
+                self.stats.events.append(f"{self.label}: недопустимый effort «{e}», использую high")
+            e = "high"
+        return e
+
+    def build_request(self, messages: list[dict], max_tokens: int | None = None) -> dict:
+        """Параметры для client.beta.messages.stream(...): system-сообщения → параметр system."""
+        system = "\n\n".join(str(m.get("content") or "") for m in messages if m.get("role") == "system")
+        msgs = [{"role": m["role"], "content": m.get("content") or ""} for m in messages if m.get("role") != "system"]
+        req: dict = {
+            "model": self.model,
+            "max_tokens": min(int(max_tokens), ANTHROPIC_MAX_TOKENS) if max_tokens else ANTHROPIC_MAX_TOKENS,
+            "messages": msgs,
+            "output_config": {"effort": self._effort()},
+            "cache_control": {"type": "ephemeral"},
+        }
+        if system:
+            req["system"] = system
+        if self.fallback:
+            req["betas"] = [FALLBACK_BETA]
+            req["fallbacks"] = "default"
+        return req
+
+    def _cache_path(self, req: dict) -> Path | None:
+        if not self.cache_dir:
+            return None
+        key_src = {k: v for k, v in req.items() if k not in ("betas", "fallbacks", "cache_control")}
+        key = hashlib.sha256(json.dumps({"u": self.url, **key_src}, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:32]
+        return self.cache_dir / f"{self.name}_{key}.json"
+
+    def chat(self, messages: list[dict], temperature: float = 0.0, max_tokens: int | None = None,
+             json_mode: bool = True, deadline: float | None = None, role: str = "reviewer") -> str:
+        # temperature и json_mode игнорируются: Claude не принимает temperature, JSON задаётся промптом
+        import anthropic
+
+        req = self.build_request(messages, max_tokens)
+        cache = self._cache_path(req)
+        if cache and cache.exists():
+            with self._lock:
+                self.stats.llm_cached += 1
+            if self.tracker:
+                self.tracker.record(provider=self.name, model=self.model, role=role, cached=True)
+            return json.loads(cache.read_text(encoding="utf-8"))["content"]
+        reserved = self.tracker.check(self.model, role, _chars(messages)) if self.tracker else 0.0
+        deadline_at = time.time() + (deadline or float(os.getenv("REQAUDIT_CALL_DEADLINE", "900")))
+        started = time.time()
+        with self._lock:
+            self.stats.llm_calls += 1
+        msg, err, request_id = None, "", ""
+        usage = None
+        try:
+            api = self.sdk.beta.messages if self.fallback else self.sdk.messages
+            body = req if self.fallback else {k: v for k, v in req.items() if k not in ("betas", "fallbacks")}
+            with api.stream(**body) as stream:
+                request_id = _stream_request_id(stream)
+                for _event in stream:
+                    if time.time() > deadline_at:
+                        usage = getattr(_snapshot(stream), "usage", None)
+                        err = "превышен бюджет времени"
+                        break
+                if not err:
+                    msg = stream.get_final_message()
+                    request_id = getattr(msg, "_request_id", None) or request_id
+        except anthropic.AuthenticationError as e:
+            err, request_id = f"неверный ANTHROPIC_API_KEY (401): {e.message}", e.request_id or ""
+        except anthropic.NotFoundError as e:
+            err, request_id = f"модель {self.model} не найдена (404): {e.message}", e.request_id or ""
+        except anthropic.RateLimitError as e:
+            err, request_id = f"лимит запросов (429) после повторов: {e.message}", e.request_id or ""
+        except anthropic.APIStatusError as e:
+            err, request_id = f"HTTP {e.status_code}: {e.message}", e.request_id or ""
+        except anthropic.APIConnectionError as e:
+            err = f"{type(e).__name__}: {e}"
+        latency = time.time() - started
+        if msg is not None:
+            usage = msg.usage
+        tok = _usage(usage)
+        with self._lock:
+            self.stats.prompt_tokens += tok["input_tokens"] + tok["cache_read"] + tok["cache_write"]
+            self.stats.completion_tokens += tok["output_tokens"]
+        if msg is not None and msg.stop_reason == "refusal":
+            cat = getattr(getattr(msg, "stop_details", None), "category", None)
+            err = f"модель отказалась отвечать (refusal, категория: {cat or 'не указана'})"
+        if err:
+            if request_id:
+                err += f" [request_id {request_id}]"
+            with self._lock:
+                self.stats.llm_failed += 1
+            if self.tracker:
+                self.tracker.record(provider=self.name, model=self.model, role=role, latency_s=latency, ok=False,
+                                    reserved=reserved, error=err, **tok)
+            raise LLMError(f"{self.label}: {err}")
+        served = str(getattr(msg, "model", "") or self.model)
+        if self.tracker:
+            self.tracker.record(provider=self.name, model=served, role=role, latency_s=latency, reserved=reserved, **tok)
+        if msg.stop_reason == "max_tokens":
+            with self._lock:
+                self.stats.events.append(f"{self.label} ({role}): ответ обрезан по max_tokens={req['max_tokens']}"
+                                         + (f" [request_id {request_id}]" if request_id else ""))
+        content = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+        if cache and content.strip() and msg.stop_reason != "max_tokens":
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps({"content": content}, ensure_ascii=False), encoding="utf-8")
+        return content
+
+    def chat_json(self, system: str, user: str, temperature: float = 0.0, max_tokens: int | None = None,
+                  deadline: float | None = None, role: str = "reviewer") -> dict:
+        return _chat_json(self, system, user, temperature, max_tokens, deadline, role)
+
+
+def _usage(u) -> dict:
+    def g(name):
+        return int(getattr(u, name, 0) or 0) if u is not None else 0
+
+    return {"input_tokens": g("input_tokens"), "output_tokens": g("output_tokens"),
+            "cache_read": g("cache_read_input_tokens"), "cache_write": g("cache_creation_input_tokens")}
+
+
+def _snapshot(stream):
+    try:
+        return stream.current_message_snapshot
+    except Exception:
+        return None
+
+
+def _stream_request_id(stream) -> str:
+    try:
+        return stream.response.headers.get("request-id") or ""
+    except Exception:
+        return ""
+
+
+def available_clients(stats: RunStats, cache_dir: Path | None, tracker=None) -> dict[str, "LLMClient | AnthropicClient"]:
+    clients: dict = {}
     for name in PRIORITY:
         company, key_env, model_env, default_model, base_env, default_base = PROVIDERS[name]
         key = os.getenv(key_env, "").strip() if key_env else ""
@@ -245,5 +467,9 @@ def available_clients(stats: RunStats, cache_dir: Path | None) -> dict[str, LLMC
                 base += "/v1"
         elif not key or not model:
             continue
-        clients[name] = LLMClient(name, company, model, base, key or None, stats, cache_dir)
+        if name == "anthropic":
+            clients[name] = AnthropicClient(name, company, model, key, stats, cache_dir, tracker=tracker,
+                                            base_url=base or None)
+            continue
+        clients[name] = LLMClient(name, company, model, base, key or None, stats, cache_dir, tracker=tracker)
     return clients

@@ -13,10 +13,11 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from rapidfuzz import fuzz
 
-from . import prompts
+from . import costs, prompts
 from .criteria import SEVERITY_ORDER, criterion_for
 from .grounding import Grounder, normalize
 from .ingest import load_document
+from .costs import BudgetExceeded
 from .llm import PRIORITY, LLMClient, LLMError, available_clients
 from .models import Document, Finding, ProviderInfo, Question, Quote, Requirement, RunStats
 from .rules import run_rules
@@ -49,6 +50,8 @@ class RunResult(BaseModel):
     stats: RunStats = Field(default_factory=RunStats)
     mode: str = "full"
     answers: list[dict] = Field(default_factory=list)
+    costs: dict = Field(default_factory=dict)  # учёт расходов (reqaudit.costs.CostTracker.summary)
+    budget_stop: str = ""  # причина остановки по бюджету (пусто — бюджет не исчерпан)
 
 
 def log(msg: str) -> None:
@@ -201,7 +204,7 @@ def _compact(f: Finding, fid: str, with_text: bool = True) -> dict:
     return d
 
 
-def pick_roles(clients: dict[str, LLMClient]):
+def pick_roles(clients: dict):
     names = list(clients)
     env_rev = [x.strip() for x in os.getenv("REQAUDIT_REVIEWERS", "").split(",") if x.strip() in clients]
     reviewers = env_rev or names[:3]
@@ -214,13 +217,29 @@ def pick_roles(clients: dict[str, LLMClient]):
         judge = reviewers[1]
     jm = os.getenv("REQAUDIT_JUDGE_MODEL", "").strip()
     if judge and jm and jm != clients[judge].model:
-        base = clients[judge]
-        clients["judge"] = LLMClient(base.name, base.company, jm, base.url, base.api_key, base.stats, base.cache_dir)
+        clients["judge"] = clients[judge].clone(jm)  # работает для любого провайдера (anthropic, openai, ...)
         judge = "judge"
     return reviewers, orch, judge
 
 
-def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -> RunResult:
+def _budget_stopped(result: RunResult, e: BudgetExceeded, step: str) -> None:
+    if not result.budget_stop:
+        result.budget_stop = str(e)
+    result.failures.append(f"{step} не выполнен: {e}")
+    log(f"  {step}: {e}")
+
+
+def finalize_costs(result: RunResult, tracker) -> None:
+    """Итоги расходов в результат прогона (паспорт, report.json) и проверка аномалии."""
+    if tracker is None:
+        return
+    result.costs = tracker.summary()
+    if tracker.exhausted and not result.budget_stop:
+        result.budget_stop = tracker.exhausted
+
+
+def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
+        force_budget: bool = False) -> RunResult:
     t0 = time.time()
     stats = RunStats()
     doc = load_document(doc_path)
@@ -238,7 +257,8 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
         else:
             result.dropped_ungrounded.append(f)
 
-    clients = available_clients(stats, cache_dir) if use_llm else {}
+    tracker = costs.start_run(document=doc.name, stats=stats, log=log) if use_llm else None
+    clients = available_clients(stats, cache_dir, tracker=tracker) if use_llm else {}
     if use_llm and not clients:
         log("LLM-ключи не найдены — работаю только на правилах (см. .env.example)")
     if not clients:
@@ -263,6 +283,25 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
             result.failures.append(f"Документ большой ({len(numbered)} символов): модели получают его целиком, "
                                    "возможна неполнота анализа удалённых разделов.")
         user = prompts.reviewer_user(req_table(reqs), numbered)
+
+        # ---- предварительная оценка стоимости прогона
+        planned = []
+        for client, focus, _label in tasks:
+            cap = int(os.getenv(f"{client.name.upper()}_MAX_FINDINGS", "25"))
+            planned.append((client.model, "reviewer", len(prompts.reviewer_system(focus, cap)) + len(user)))
+        planned.append((clients[orch_name].model, "orchestrator",
+                        len(prompts.ORCH_SYSTEM) + len(prompts.orch_user("", numbered)) + 30_000))
+        planned.append((clients[judge_name].model, "judge",
+                        len(prompts.JUDGE_SYSTEM) + len(prompts.judge_user("", numbered)) + 20_000))
+        est, unpriced = tracker.preflight(planned)
+        log(f"оценка стоимости прогона: ${est:.2f} за {len(planned)} вызовов"
+            + (f" (+ н/д для {', '.join(unpriced)})" if unpriced else "")
+            + f"; бюджет прогона ${tracker.run_limit:.2f}, за сутки потрачено ${tracker.daily_spent:.2f} "
+              f"из ${tracker.daily_limit:.2f}")
+        if est > tracker.run_limit and not force_budget:
+            raise BudgetExceeded(f"Оценка стоимости прогона {costs.fmt_usd(est)} превышает бюджет REQAUDIT_BUDGET_USD="
+                                 f"{costs.fmt_usd(tracker.run_limit)}. Прогон не начат; увеличьте бюджет или запустите "
+                                 f"с --force-budget.", limit_usd=tracker.run_limit, preflight=True)
         log(f"консилиум: {', '.join(t[2] for t in tasks)} (параллельно)")
 
         def review(task):
@@ -270,7 +309,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
             started = time.time()
             cap = int(os.getenv(f"{client.name.upper()}_MAX_FINDINGS", "25"))
             data = client.chat_json(prompts.reviewer_system(variant, cap), user, max_tokens=16000,
-                                    deadline=float(os.getenv("REQAUDIT_REVIEW_DEADLINE", "480")))
+                                    deadline=float(os.getenv("REQAUDIT_REVIEW_DEADLINE", "480")), role="reviewer")
             fs = _to_findings(data, label)
             log(f"  ревьюер {label}: {len(fs)} находок за {time.time() - started:.0f} с")
             return fs
@@ -284,6 +323,8 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
                             all_findings.append(f)
                         else:
                             result.dropped_ungrounded.append(f)
+                except BudgetExceeded as e:
+                    _budget_stopped(result, e, f"Ревьюер {t[2]}")
                 except (LLMError, ValueError) as e:
                     result.failures.append(f"Ревьюер {t[2]} недоступен: {str(e)[:200]}")
                     log(f"  ревьюер {t[2]} упал: {str(e)[:160]}")
@@ -301,7 +342,10 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
     # ---------------------------------------------------------------- оркестратор
     ids: dict[str, Finding] = {}
     dup_map: dict[str, str] = {}
-    if clients and merged:
+    if clients and merged and tracker.exhausted:
+        result.failures.append("Оркестратор пропущен: исчерпан бюджет — применена детерминированная склейка.")
+        prio_objs = []
+    elif clients and merged:
         orch = clients[orch_name]
         if os.getenv("REQAUDIT_ORCH_EFFORT"):
             orch.reasoning_effort = os.environ["REQAUDIT_ORCH_EFFORT"]
@@ -310,7 +354,8 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
         payload = json.dumps([_compact(f, k) for k, f in ids.items()], ensure_ascii=False)
         try:
             log(f"оркестратор: {orch.label}")
-            data = orch.chat_json(prompts.ORCH_SYSTEM, prompts.orch_user(payload, doc.numbered_text()), max_tokens=32000)
+            data = orch.chat_json(prompts.ORCH_SYSTEM, prompts.orch_user(payload, doc.numbered_text()), max_tokens=32000,
+                                  role="orchestrator")
             dup = set()
             dup_map: dict[str, str] = {}
             for item in data.get("findings") or []:
@@ -339,6 +384,9 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
             result.readiness = {str(k): str(v) for k, v in rd.items() if v} if isinstance(rd, dict) else {}
             merged = [f for k, f in ids.items() if k not in dup]
             prio_objs = [ids[k] for k in result.priority]
+        except BudgetExceeded as e:
+            _budget_stopped(result, e, "Оркестратор")
+            prio_objs = []
         except (LLMError, ValueError) as e:
             result.failures.append(f"Оркестратор недоступен: {str(e)[:200]} — применена детерминированная склейка.")
             log(f"  оркестратор упал: {str(e)[:160]}")
@@ -351,7 +399,9 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
         f.fid = f"F-{i:02d}"
 
     # ---------------------------------------------------------------- судья
-    if clients and merged:
+    if clients and merged and tracker.exhausted:
+        result.failures.append("Судья пропущен: исчерпан бюджет — находки не перепроверены.")
+    elif clients and merged:
         judge = clients[judge_name]
         if os.getenv("REQAUDIT_JUDGE_EFFORT"):
             judge.reasoning_effort = os.environ["REQAUDIT_JUDGE_EFFORT"]
@@ -360,7 +410,8 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
         payload = json.dumps([_compact(f, f.fid) for f in merged if f.proof != "Ш"], ensure_ascii=False)
         try:
             log(f"судья: {judge.label}" + ("" if result.judge_independent else " (не независим: участвовал в ревью)"))
-            data = judge.chat_json(prompts.JUDGE_SYSTEM, prompts.judge_user(payload, doc.numbered_text()), max_tokens=16000)
+            data = judge.chat_json(prompts.JUDGE_SYSTEM, prompts.judge_user(payload, doc.numbered_text()), max_tokens=16000,
+                                   role="judge")
             by_id = {f.fid: f for f in merged}
             for v in data.get("verdicts") or []:
                 f = by_id.get(str(v.get("id") or ""))
@@ -385,6 +436,8 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
                 else:
                     kept.append(f)
             merged = kept
+        except BudgetExceeded as e:
+            _budget_stopped(result, e, "Судья")
         except (LLMError, ValueError) as e:
             result.failures.append(f"Судья недоступен: {str(e)[:200]} — находки не перепроверены.")
             log(f"  судья упал: {str(e)[:160]}")
@@ -410,6 +463,12 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
     for c in result.checklist:
         c["why"] = _remap_ids(str(c.get("why", "")), alive, ids, dup_map)
     stats.seconds = time.time() - t0
+    if tracker is not None:
+        anomaly = tracker.anomaly()
+        if anomaly:
+            result.failures.append(anomaly)
+        finalize_costs(result, tracker)
+        log(f"стоимость прогона: {costs.passport_line(result.costs)}")
     log(f"готово: {len(merged)} находок, вызовов LLM: {stats.llm_calls} (кэш: {stats.llm_cached}), {stats.seconds:.0f} с")
     return result
 

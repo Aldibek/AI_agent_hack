@@ -25,9 +25,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-cache", action="store_true", help="не использовать кэш ответов LLM")
     p.add_argument("--interactive", action="store_true", help="задать главные вопросы в терминале и перепроверить")
     p.add_argument("--answers", help="YAML/JSON с ответами на вопросы (повторяемый прогон)")
-    p.add_argument("--reviewers", help="провайдеры-ревьюеры через запятую (alem,gemini,groq,openrouter,openai,ollama)")
+    p.add_argument("--reviewers",
+                   help="провайдеры-ревьюеры через запятую (anthropic,alem,gemma,gemini,groq,openrouter,openai,ollama)")
     p.add_argument("--judge", help="провайдер-судья")
     p.add_argument("--variants", type=int, help="число проходов ревьюера на одну модель (по умолчанию 2 при одной модели)")
+    p.add_argument("--force-budget", action="store_true",
+                   help="начать прогон, даже если предварительная оценка стоимости выше REQAUDIT_BUDGET_USD")
     args = p.parse_args(argv)
 
     if args.reviewers:
@@ -37,6 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.variants:
         os.environ["REQAUDIT_VARIANTS"] = str(args.variants)
 
+    from .costs import BudgetExceeded
     from .pipeline import run
     from .report import render, write_source, write_trace
 
@@ -45,7 +49,10 @@ def main(argv: list[str] | None = None) -> int:
         out = out.with_suffix(".md")
     cache = None if args.no_cache else root / ".reqaudit_cache"
     try:
-        result = run(args.input, use_llm=not args.no_llm, cache_dir=cache)
+        result = run(args.input, use_llm=not args.no_llm, cache_dir=cache, force_budget=args.force_budget)
+    except BudgetExceeded as e:
+        print(f"Бюджет: {e}", file=sys.stderr)
+        return 3
     except (FileNotFoundError, ValueError) as e:
         print(f"Ошибка: {e}", file=sys.stderr)
         return 2
@@ -64,6 +71,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Отчёт: {out} (наглядная версия: {out.with_suffix('.html')})", file=sys.stderr)
     print(f"Трассировка: {out.with_suffix('.json')}; текст документа с номерами строк: {out.with_suffix('.source.txt')}",
           file=sys.stderr)
+    if result.budget_stop:
+        print(f"Внимание: {result.budget_stop} Отчёт построен по выполненным шагам.", file=sys.stderr)
+        return 3
     return 0
 
 

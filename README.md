@@ -24,9 +24,9 @@ flowchart LR
     IN[PDF / DOCX / MD] --> ING[Извлечение текста<br/>код, номера строк и страниц]
     ING --> SEG[Нарезка R-xx<br/>по разделам шаблона]
     SEG --> RUL[15 правил<br/>без LLM]
-    SEG --> R1[GPT · проход 1<br/>5 ролей]
-    SEG --> R2[GPT · проход 2<br/>сверка разделов]
-    SEG --> R4[GPT · проход 3<br/>«два разработчика»]
+    SEG --> R1[Claude Opus 5.5 · проход 1<br/>5 ролей]
+    SEG --> R2[Claude Opus 5.5 · проход 2<br/>сверка разделов]
+    SEG --> R4[Claude Opus 5.5 · проход 3<br/>«два разработчика»]
     SEG --> R3[Gemma 4<br/>5 ролей]
     RUL --> GR[Проверка цитат<br/>код]
     R1 --> GR
@@ -34,9 +34,9 @@ flowchart LR
     R4 --> GR
     R3 --> GR
     GR --> MRG[Склейка<br/>и голосование]
-    MRG --> ORC[Оркестратор GPT<br/>доказанность, вопросы,<br/>чек-лист банка]
+    MRG --> ORC[Оркестратор Claude Opus 5.5<br/>доказанность, вопросы,<br/>чек-лист банка]
     ORC --> HUM{{Человек в контуре<br/>ответы → ТЗ v2}}
-    HUM --> JDG[Судья GPT-5.5<br/>не участвовал в ревью]
+    HUM --> JDG[Судья Claude Sonnet 5.5<br/>не участвовал в ревью]
     ORC --> JDG
     JDG --> VER[Вердикт по правилу<br/>калибровка тяжести]
     VER --> OUT[Отчёт .md + .html<br/>трассировка .json]
@@ -64,7 +64,12 @@ pip install -r requirements.txt
 ## Ключ LLM
 
 1. Получите ключ хотя бы одного провайдера:
-   - **OpenAI**: <https://platform.openai.com/api-keys> → `OPENAI_API_KEY`;
+   - **Anthropic (Claude)** — основной провайдер: <https://platform.claude.com/settings/keys> → `ANTHROPIC_API_KEY`.
+     Вызов идёт через официальный SDK `anthropic` (потоково, `output_config.effort`, server-side fallback при отказе модели;
+     `temperature`/`thinking` не передаются — на текущих моделях Claude это ошибка 400). Модель — `ANTHROPIC_MODEL`
+     (по умолчанию `claude-opus-5-5`), глубина рассуждения — `ANTHROPIC_EFFORT` (`low|medium|high|xhigh|max`,
+     по умолчанию `high`);
+   - **OpenAI** (по желанию): <https://platform.openai.com/api-keys> → `OPENAI_API_KEY`;
    - **AlemLLM** (alem.ai, казахстанская модель): ключ из личного кабинета alem.ai → `ALEM_API_KEY`
      (для `gemma4` на alem.ai — отдельный ключ → `GEMMA_API_KEY`);
    - **Google Gemini**, бесплатно: <https://aistudio.google.com/apikey> → *Create API key* → `GEMINI_API_KEY`;
@@ -72,7 +77,7 @@ pip install -r requirements.txt
 2. Скопируйте пример конфига и вставьте ключ:
    ```bash
    cp .env.example .env
-   # откройте .env и заполните, например, GEMINI_API_KEY=... и/или ALEM_API_KEY=...
+   # откройте .env и заполните, например, ANTHROPIC_API_KEY=... и/или GEMMA_API_KEY=...
    ```
    Файл `.env` в репозиторий не попадает (он в `.gitignore`).
 
@@ -80,16 +85,41 @@ pip install -r requirements.txt
 
 | Роль | Модель |
 | :--- | :--- |
-| Ревьюер 1 (основной), 3 прохода: общий · сверка разделов/терминология/ИБ · «два разработчика» | OpenAI `gpt-6.2-sol` |
-| Ревьюер 2 | AlemLLM `alemllm` (alem.ai, Казахстан) |
-| Ревьюер 3 | Google Gemma `gemma4` (через alem.ai) |
-| Оркестратор (главный) | OpenAI `gpt-6.2-sol` |
-| Судья | OpenAI `gpt-5.5` — другая модель, в ревью не участвовала |
+| Ревьюер 1 (основной), 3 прохода: общий · сверка разделов/терминология/ИБ · «два разработчика» (`ANTHROPIC_FOCUS=0,2,3`) | Anthropic `claude-opus-5-5`, effort `high` |
+| Ревьюер 2 | Google Gemma `gemma4` (через alem.ai) |
+| Оркестратор (главный) | Anthropic `claude-opus-5-5` (effort — `REQAUDIT_ORCH_EFFORT`) |
+| Судья | Anthropic `claude-sonnet-5-5` (`REQAUDIT_JUDGE_MODEL`) — другая модель, в ревью не участвовала (effort — `REQAUDIT_JUDGE_EFFORT`) |
 
-Имена моделей и роли задаются в `.env` (`OPENAI_MODEL`, `ALEM_MODEL`, `REQAUDIT_REVIEWERS`, `REQAUDIT_JUDGE_MODEL`, …).
+AlemLLM `alemllm` подключается добавлением в `REQAUDIT_REVIEWERS` (медленная модель). Провайдер OpenAI сохранён и
+включается так же (`REQAUDIT_REVIEWERS=openai,...`, `OPENAI_FOCUS`), но больше не используется по умолчанию.
+Имена моделей и роли задаются в `.env` (`ANTHROPIC_MODEL`, `GEMMA_MODEL`, `REQAUDIT_REVIEWERS`, `REQAUDIT_JUDGE_MODEL`, …).
 **Достаточно одного любого ключа:** тогда агент делает 2 независимых прохода одной модели. Каждый дополнительный ключ
 добавляет ревьюера другой компании. Медленный ревьюер ограничен бюджетом времени (`REQAUDIT_REVIEW_DEADLINE`): если он
 не успел, прогон продолжается без него, а в паспорте отчёта ставится пометка.
+
+## Контроль расходов
+
+Каждый вызов LLM учитывается модулем `reqaudit/costs.py`:
+
+- **Журнал** `.reqaudit_costs/ledger.jsonl` (в `.gitignore`): одна строка JSON на вызов — время, `run_id`, документ,
+  провайдер, модель, роль (`reviewer` / `orchestrator` / `judge` / `clarify`), токены вход/выход/кэш чтение/кэш запись,
+  стоимость, задержка, успех. Ответы из дискового кэша тоже пишутся (`cached: true`, стоимость 0).
+- **Цены**, $ за 1M токенов (вход / выход / чтение кэша / запись кэша): `claude-opus-5-5` 4.00 / 20.00 / 0.20 / 5.00,
+  `claude-sonnet-5-5` 2.00 / 10.00 / 0.10 / 2.50, `claude-haiku-5-5` 0.10 / 0.50 / 0.01 / 0.125. Для остальных моделей
+  стоимость «н/д» (токены считаются). Переопределение — JSON-файл в `REQAUDIT_PRICES_FILE`
+  (`{"model": {"input": .., "output": .., "cache_read": .., "cache_write": ..}}`).
+- **Бюджеты:** `REQAUDIT_BUDGET_USD` — на прогон (по умолчанию 3.0), `REQAUDIT_DAILY_BUDGET_USD` — за сутки по журналу
+  (по умолчанию 15.0). Перед каждым вызовом оценивается его стоимость: (символы входа / 3,5) × цена входа +
+  max(2000, средний выход прошлых вызовов этой роли) × цена выхода; учитываются и параллельные вызовы «в полёте».
+  Если лимит был бы превышен, вызов не делается: дальнейшие LLM-шаги пропускаются, отчёт строится по тому, что есть,
+  в паспорте и разделе «Покрытие и ограничения» — «Прогон остановлен: исчерпан бюджет $X», код выхода **3**.
+  При 80% любого лимита — одно предупреждение в консоль и в отчёт.
+- **Предварительная оценка:** перед LLM-шагами печатается оценка стоимости прогона. Если она выше `REQAUDIT_BUDGET_USD`,
+  прогон не начинается (код 3); `--force-budget` — начать всё равно (пошаговая проверка бюджета остаётся).
+- **Аномалии:** если прогон стоил больше 2× медианы последних 10 прогонов — предупреждение в консоль и в отчёт.
+- **Отчёт:** строка «Стоимость прогона» в паспорте; в `report.json` — блок `costs` с разбивкой по модели и роли.
+- **Просмотр:** `python -m reqaudit.costs [--days 7]` — расходы по дням, моделям, ролям, топ-5 дорогих прогонов и
+  текущий расход относительно дневного лимита.
 
 ## Запуск (одна команда)
 
@@ -154,7 +184,7 @@ python -m reqaudit ../ai-requirements-validator-task/docs/requirements.md report
 ## Проверка качества агента
 
 ```bash
-python -m unittest discover -s tests -v                     # тесты детерминированной части
+python -m unittest discover -s tests -v                     # тесты (без сети и ключей; Claude замокан)
 python eval/score.py reports/report.json eval/gold_requirements.json   # сверка отчёта с эталоном
 ```
 
@@ -164,8 +194,10 @@ python eval/score.py reports/report.json eval/gold_requirements.json   # све�
 | Режим | Найдено эталонных проблем | Блокеры | Ложные срабатывания на «не-дефектах» | Время |
 | :--- | :--- | :--- | :--- | :--- |
 | Только правила (`--no-llm`) | 16 из 35 (46%) | 2 из 10 | 0 из 5 | < 1 с |
-| Полный: GPT + Gemma, оркестратор GPT, судья GPT-5.5 | 35 из 35 | 10 из 10 | 0 из 5 | ~8–9 мин |
+| Полный: GPT + Gemma, оркестратор GPT, судья GPT-5.5 (прежняя конфигурация) | 35 из 35 | 10 из 10 | 0 из 5 | ~8–9 мин |
 | Полный, вход — **PDF** того же документа | 33 из 35 | 10 из 10 | 0 из 5 | ~7,5 мин |
+
+Замеры полного режима выполнены на прежней конфигурации (OpenAI GPT); на конфигурации с Claude они ещё не повторялись.
 
 Судья отсеивает ложные срабатывания ревьюеров: в одном из прогонов он отклонил находку Gemma «404 для чужой карты —
 раскрытие существования карты» (это допустимая практика сокрытия ресурса), в другом — две надуманные «неполноты».
@@ -184,7 +216,9 @@ reqaudit/
   ingest.py      извлечение текста PDF/DOCX/MD с номерами строк
   segment.py     нарезка на требования
   rules.py       детерминированные проверки
-  llm.py         клиент OpenAI-совместимых API (Alem, Gemini, Groq, OpenRouter, OpenAI, Ollama), повторы, кэш
+  llm.py         клиенты LLM: Claude (SDK anthropic) и OpenAI-совместимые API (Alem, Gemma, Gemini, Groq, OpenRouter,
+                 OpenAI, Ollama), повторы, кэш
+  costs.py       учёт расходов: цены, журнал вызовов, бюджеты, аномалии; `python -m reqaudit.costs`
   prompts.py     промпты ревьюера (5 ролей), оркестратора, судьи
   grounding.py   проверка цитат
   pipeline.py    конвейер: консилиум, склейка, голосование, оркестратор, судья

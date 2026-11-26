@@ -13,11 +13,11 @@ import re
 import sys
 from pathlib import Path
 
-from . import prompts
+from . import costs, prompts
 from .criteria import SEVERITY_ORDER
 from .llm import LLMError, available_clients
 from .models import Finding
-from .pipeline import RunResult, log
+from .pipeline import RunResult, finalize_costs, log
 
 
 def _ordered_questions(result: RunResult) -> list[Finding]:
@@ -86,7 +86,8 @@ def apply_answers(result: RunResult, *, interactive: bool, answers_path: str | N
               "question": by_id[fid].question.text if by_id[fid].question else "", "answer": a}
              for fid, a in answers.items()]
     updates = {}
-    clients = available_clients(result.stats, cache_dir)
+    tracker = costs.current()
+    clients = available_clients(result.stats, cache_dir, tracker=tracker)
     client = None
     if result.orchestrator and result.orchestrator.name in clients:
         client = clients[result.orchestrator.name]
@@ -98,10 +99,11 @@ def apply_answers(result: RunResult, *, interactive: bool, answers_path: str | N
             data = client.chat_json(prompts.RECHECK_SYSTEM,
                                     "Ответы автора (JSON):\n" + json.dumps(items, ensure_ascii=False) +
                                     "\n\nДокумент:\n<<<DOCUMENT\n" + result.doc.numbered_text() + "\nDOCUMENT>>>",
-                                    max_tokens=6000)
+                                    max_tokens=6000, role="clarify")
             updates = {str(u.get("id")): u for u in data.get("updates") or [] if isinstance(u, dict)}
         except (LLMError, ValueError) as e:
             result.failures.append(f"Перепроверка по ответам не выполнена: {str(e)[:200]}")
+        finalize_costs(result, tracker)
     status_ru = {"resolved": "решение получено — исправить документ", "partial": "частично", "open": "остаётся открытым"}
     for fid, a in answers.items():
         u = updates.get(fid, {})
