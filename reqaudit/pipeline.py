@@ -172,6 +172,8 @@ def merge_findings(findings: list[Finding]) -> list[Finding]:
                 for fld in ("scenario", "impact", "suggestion", "search_scope"):
                     if not getattr(rep, fld) and getattr(m, fld):
                         setattr(rep, fld, getattr(m, fld))
+                if "Разработчик А" in m.scenario and "Разработчик А" not in rep.scenario:
+                    rep.scenario = m.scenario  # сценарий «два разработчика» — самое наглядное доказательство
                 if not rep.question and m.question:
                     rep.question = m.question
                 rep.rids = sorted(set(rep.rids) | set(m.rids))
@@ -248,7 +250,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
         for i, name in enumerate(reviewers):
             focus_env = os.getenv(f"{name.upper()}_FOCUS", "").strip()
             if focus_env:
-                foci = [int(x) % 3 for x in focus_env.split(",") if x.strip().isdigit()]
+                foci = [int(x) % 4 for x in focus_env.split(",") if x.strip().isdigit()]
             else:
                 foci = [(i + v) % 3 for v in range(int(os.getenv(f"{name.upper()}_VARIANTS", variants)))]
             for v, focus in enumerate(foci):
@@ -432,6 +434,8 @@ def _remap_ids(text: str, alive: set[int], ids: dict[str, Finding], dup_map: dic
 def _apply_orch(f: Finding, item: dict) -> None:
     for fld in ("title", "explanation", "scenario", "impact", "suggestion"):
         val = item.get(fld)
+        if fld == "scenario" and "Разработчик А" in f.scenario:
+            continue  # не затираем сценарий «два разработчика»
         if isinstance(val, str) and val.strip():
             setattr(f, fld, val.strip())
     cat = str(item.get("category") or "").lower()
