@@ -50,11 +50,17 @@ def _from_text(raw: str, pages: list[int] | None = None) -> list[Line]:
 
 
 def _load_pdf(path: Path) -> tuple[list[Line], int, list[str]]:
-    import pymupdf  # noqa: F401  (pymupdf4llm требует pymupdf)
-    import pymupdf4llm
+    import contextlib
+    import io
 
     warnings: list[str] = []
-    chunks = pymupdf4llm.to_markdown(str(path), page_chunks=True, show_progress=False)
+    buf = io.StringIO()
+    # разборщик PDF печатает служебные сообщения (OCR и т.п.) — не засоряем вывод агента
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        import pymupdf  # noqa: F401  (pymupdf4llm требует pymupdf)
+        import pymupdf4llm
+
+        chunks = pymupdf4llm.to_markdown(str(path), page_chunks=True, show_progress=False)
     texts: list[str] = []
     pages: list[int] = []
     for idx, ch in enumerate(chunks, start=1):

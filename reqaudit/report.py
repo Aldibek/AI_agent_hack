@@ -64,6 +64,9 @@ def _votes_str(f: Finding, total: int) -> str:
     return "; ".join(parts) or f.source
 
 
+PAGES: dict[int, int] = {}  # номер строки → страница PDF (заполняется в render)
+
+
 def finding_block(f: Finding, by_id: dict[str, Requirement], total_reviewers: int) -> list[str]:
     out = [f"#### {f.fid} · {category_ru(f.category)} · {SEV_ICON.get(f.severity, '')} {SEVERITY_RU.get(f.severity, f.severity)} · [{f.proof}] {PROOF_RU.get(f.proof, '')}",
            "", f"**Суть:** {f.title}", ""]
@@ -73,6 +76,8 @@ def finding_block(f: Finding, by_id: dict[str, Requirement], total_reviewers: in
     out += [f"**Где:** {where}", ""]
     for q in f.quotes:
         loc = f"строка {q.line_start}" if q.line_start == q.line_end else f"строки {q.line_start}–{q.line_end}"
+        if PAGES.get(q.line_start):
+            loc += f", с. {PAGES[q.line_start]}"
         out.append(f"> {loc}: «{q.text.strip()}»")
     if f.quotes:
         out.append("")
@@ -110,6 +115,8 @@ def is_set_level(f: Finding) -> bool:
 
 def render(result: RunResult, out_path: Path) -> str:
     doc, reqs, findings = result.doc, result.reqs, result.findings
+    PAGES.clear()
+    PAGES.update({ln.n: ln.page for ln in doc.lines if ln.page})
     by_id = {r.rid: r for r in reqs}
     total = len(result.reviewer_labels)
     v = compute(findings, reqs)

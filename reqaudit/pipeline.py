@@ -257,6 +257,9 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None) -
         result.reviewers = [clients[n].info for n in reviewers]
         result.reviewer_labels = [t[2] for t in tasks]
         numbered = doc.numbered_text()
+        if len(numbered) > 150_000:
+            result.failures.append(f"Документ большой ({len(numbered)} символов): модели получают его целиком, "
+                                   "возможна неполнота анализа удалённых разделов.")
         user = prompts.reviewer_user(req_table(reqs), numbered)
         log(f"консилиум: {', '.join(t[2] for t in tasks)} (параллельно)")
 
