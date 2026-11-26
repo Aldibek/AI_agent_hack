@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -51,6 +52,7 @@ class RunResult(BaseModel):
     answers: list[dict] = Field(default_factory=list)
     costs: dict = Field(default_factory=dict)  # учёт расходов (reqaudit.costs.CostTracker.summary)
     budget_stop: str = ""  # причина остановки по бюджету (пусто — бюджет не исчерпан)
+    finished_at: str = ""  # дата и время окончания прогона (для паспорта и HTML)
     budget_blocked: list[str] = Field(default_factory=list)  # отдельные вызовы, не поместившиеся в бюджет прогона
     coverage: dict[str, dict] = Field(default_factory=dict)  # R-xx → {"status": ok|defect|unchecked, "note": ...}
     steps: dict[str, str] = Field(default_factory=dict)  # шаг → ok | budget | error | skipped (для честного «Режима»)
@@ -472,6 +474,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
             if isinstance(val, str) and "C-" in val:
                 setattr(f, fld, _remap_prose(val, alive, ids, dup_map))
     stats.seconds = time.time() - t0
+    result.finished_at = datetime.now().strftime("%d.%m.%Y %H:%M")
     if tracker is not None:
         anomaly = tracker.anomaly()
         if anomaly:

@@ -2,7 +2,7 @@
 name = "reqaudit"
 version = "0.1.0"
 description = "Агент статической проверки требований по ISO/IEC/IEEE 29148 и IEEE 830"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
   "pymupdf4llm>=2.2",
   "pydantic>=2.6",

@@ -42,7 +42,7 @@ flowchart TD
 
 ## Установка
 
-Нужен Python 3.10+.
+Нужен Python 3.11+ (этого требует `pymupdf4llm`, через который читается PDF).
 
 ```bash
 git clone https://github.com/Aldibek/AI_agent_hack.git && cd AI_agent_hack
