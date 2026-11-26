@@ -69,7 +69,7 @@ class FakeSDK:
 
 
 ENV_KEYS = [PROVIDERS[n][1] for n in PROVIDERS if PROVIDERS[n][1]] + [
-    "OLLAMA_BASE_URL", "OLLAMA_MODEL", "REQAUDIT_REVIEWERS", "REQAUDIT_JUDGE", "REQAUDIT_ORCHESTRATOR",
+    "REQAUDIT_REVIEWERS", "REQAUDIT_JUDGE", "REQAUDIT_ORCHESTRATOR",
     "REQAUDIT_JUDGE_MODEL", "REQAUDIT_ORCH_MODEL", "REQAUDIT_VARIANTS", "ANTHROPIC_FOCUS", "ANTHROPIC_EFFORT", "ANTHROPIC_MODEL",
     "REQAUDIT_ORCH_EFFORT", "REQAUDIT_JUDGE_EFFORT", "REQAUDIT_PRICES_FILE", "ANTHROPIC_FALLBACK",
     "ANTHROPIC_BASE_URL"]
@@ -78,7 +78,8 @@ ENV_KEYS = [PROVIDERS[n][1] for n in PROVIDERS if PROVIDERS[n][1]] + [
 class CostsBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.env = mock.patch.dict(os.environ, {"REQAUDIT_COSTS_DIR": self.tmp.name, "REQAUDIT_BUDGET_USD": "3.0",
+        self.env = mock.patch.dict(os.environ, {"REQAUDIT_COSTS_DIR": self.tmp.name, "REQAUDIT_FAILED_DIR": self.tmp.name,
+                                                "REQAUDIT_BUDGET_USD": "3.0",
                                                 "REQAUDIT_DAILY_BUDGET_USD": "15.0"})
         self.env.start()
         for k in ENV_KEYS:  # реальные ключи и роли из окружения не должны влиять на тесты
@@ -108,21 +109,21 @@ class CostCalcTest(CostsBase):
         self.assertAlmostEqual(call_cost("claude-haiku-5-5", 2_000_000, 0, 0, 1_000_000), 0.325)
 
     def test_unknown_model_cost_is_none(self):
-        self.assertIsNone(call_cost("llama-3.3-70b-versatile", 1000, 1000))
+        self.assertIsNone(call_cost("gemini-flash-latest", 1000, 1000))
         tr = self.tracker()
-        row = tr.record(provider="groq", model="llama-3.3-70b-versatile", role="reviewer", input_tokens=10, output_tokens=5)
+        row = tr.record(provider="gemini", model="gemini-flash-latest", role="reviewer", input_tokens=10, output_tokens=5)
         self.assertIsNone(row["cost_usd"])
         self.assertEqual(row["input_tokens"], 10)
-        self.assertEqual(tr.summary()["unpriced_models"], ["llama-3.3-70b-versatile"])
+        self.assertEqual(tr.summary()["unpriced_models"], ["gemini-flash-latest"])
         self.assertIn("н/д", costs.passport_line(tr.summary()))
 
     def test_prices_file_override(self):
         p = Path(self.tmp.name) / "prices.json"
-        p.write_text(json.dumps({"llama-3.3-70b-versatile": {"input": 1, "output": 2, "cache_read": 0, "cache_write": 0},
+        p.write_text(json.dumps({"gemini-flash-latest": {"input": 1, "output": 2, "cache_read": 0, "cache_write": 0},
                                  "claude-opus-5-5": {"input": 10}}), encoding="utf-8")
         with mock.patch.dict(os.environ, {"REQAUDIT_PRICES_FILE": str(p)}):
             prices = costs.load_prices()
-        self.assertAlmostEqual(call_cost("llama-3.3-70b-versatile", 1_000_000, 1_000_000, prices=prices), 3.0)
+        self.assertAlmostEqual(call_cost("gemini-flash-latest", 1_000_000, 1_000_000, prices=prices), 3.0)
         self.assertEqual(prices["claude-opus-5-5"]["input"], 10)
         self.assertEqual(prices["claude-opus-5-5"]["output"], 20.0)  # не указанное — из таблицы по умолчанию
 
@@ -136,7 +137,7 @@ class CostCalcTest(CostsBase):
         self.assertAlmostEqual(tr.estimate("claude-opus-5-5", "judge", 3500), 1000 * 5e-6 + 10_000 * 20e-6)
         # история другой модели той же роли не влияет
         self.assertAlmostEqual(tr.estimate("claude-sonnet-5-5", "judge", 3500), 1000 * 2.5e-6 + 3000 * 10e-6)
-        self.assertIsNone(tr.estimate("llama-3.3-70b-versatile", "judge", 3500))
+        self.assertIsNone(tr.estimate("gemini-flash-latest", "judge", 3500))
 
     def test_estimate_uses_last_successful_calls_from_ledger(self):
         tr = self.tracker()
@@ -512,6 +513,23 @@ class PipelineCostsTest(CostsBase):
         self.assertEqual(result.orchestrator.model, "claude-sonnet-5-5")
         text = render(result, Path(self.tmp.name) / "r.md")
         self.assertIn("| Режим | правила + LLM-консилиум (3/3 проходов) + оркестратор + судья |", text)
+
+
+class RoleModelTest(unittest.TestCase):
+    def test_role_model_not_applied_to_other_provider(self):
+        from reqaudit.llm import LLMClient
+        from reqaudit.pipeline import pick_roles
+
+        stats = RunStats()
+        gem = LLMClient("gemini", "Google", "gemini-flash-latest", "https://x/v1", "k", stats, None)
+        env = {"REQAUDIT_REVIEWERS": "anthropic", "REQAUDIT_ORCHESTRATOR": "anthropic", "REQAUDIT_JUDGE": "anthropic",
+               "REQAUDIT_ORCH_MODEL": "claude-sonnet-5-5", "REQAUDIT_JUDGE_MODEL": "claude-sonnet-5-5"}
+        with mock.patch.dict(os.environ, env):
+            clients = {"gemini": gem}
+            reviewers, orch, judge = pick_roles(clients)
+        self.assertEqual(reviewers, ["gemini"])
+        self.assertEqual(clients[orch].model, "gemini-flash-latest")  # не claude-sonnet-5-5 на Gemini
+        self.assertEqual(clients[judge].model, "gemini-flash-latest")
 
 
 class JsonRepairTest(unittest.TestCase):

@@ -24,21 +24,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-llm", action="store_true", help="только детерминированные правила, без вызовов LLM")
     p.add_argument("--no-cache", action="store_true", help="не использовать кэш ответов LLM")
     p.add_argument("--interactive", action="store_true", help="задать главные вопросы в терминале и перепроверить")
-    p.add_argument("--answers", help="YAML/JSON с ответами на вопросы (повторяемый прогон)")
-    p.add_argument("--reviewers",
-                   help="провайдеры-ревьюеры через запятую (anthropic,gemini,groq,openrouter,openai,ollama)")
-    p.add_argument("--judge", help="провайдер-судья")
-    p.add_argument("--variants", type=int, help="число проходов ревьюера на одну модель (по умолчанию 2 при одной модели)")
     p.add_argument("--force-budget", action="store_true",
                    help="начать прогон, даже если предварительная оценка стоимости выше REQAUDIT_BUDGET_USD")
     args = p.parse_args(argv)
-
-    if args.reviewers:
-        os.environ["REQAUDIT_REVIEWERS"] = args.reviewers
-    if args.judge:
-        os.environ["REQAUDIT_JUDGE"] = args.judge
-    if args.variants:
-        os.environ["REQAUDIT_VARIANTS"] = str(args.variants)
 
     from .costs import BudgetExceeded
     from .pipeline import run
@@ -57,10 +45,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Ошибка: {e}", file=sys.stderr)
         return 2
 
-    if args.interactive or args.answers:
+    if args.interactive:
         from .clarify import apply_answers
 
-        apply_answers(result, interactive=args.interactive, answers_path=args.answers, cache_dir=cache)
+        apply_answers(result, cache_dir=cache)
 
     render(result, out)
     write_trace(result, out.with_suffix(".json"))

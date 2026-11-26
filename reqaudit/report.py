@@ -295,17 +295,8 @@ def render(result: RunResult, out_path: Path) -> str:
             L.append(f"| {a.get('fid')}: {_esc(a.get('question', ''))} | {_esc(a.get('answer', ''))} | {_esc(a.get('status', ''))} | {_esc(a.get('rewrite', ''))} |")
         L.append("")
 
-    # чек-лист банка
-    if result.checklist:
-        L += ["## 6. Черновик заполнения чек-листа «Ревью требований» из документа", "",
-              "Агент предлагает ответы на пункты чек-листа шаблона по результатам проверки (для подтверждения ответственным).", "",
-              "| Проверка | Ответ агента | Обоснование |", "| :--- | :--- | :--- |"]
-        for c in result.checklist:
-            L.append(f"| {_esc(str(c.get('item', '')))} | {_esc(str(c.get('answer', '')))} | {_esc(str(c.get('why', '')))} |")
-        L.append("")
-
     # сводка
-    L += ["## 7. Сводка", ""]
+    L += ["## 6. Сводка", ""]
     kinds = Counter(KIND_RU.get(r.kind, r.kind) for r in reqs)
     L.append(f"- **Требований:** {len(reqs)} (" + ", ".join(f"{k}: {n}" for k, n in kinds.most_common()) + ").")
     L.append(f"- **Требований с замечаниями:** {len(per_req)} из {len(reqs)}.")
@@ -332,7 +323,7 @@ def render(result: RunResult, out_path: Path) -> str:
         L.append("")
 
     # итог
-    L += ["## 8. Итог", ""]
+    L += ["## 7. Итог", ""]
     for label, key in (("Разработка", "dev"), ("Тестирование", "test")):
         st, reasons = v[key]
         line = f"- **{label}: {st.lower()} начинать по текущей версии документа.**" if st == "Нельзя" else \
@@ -348,7 +339,7 @@ def render(result: RunResult, out_path: Path) -> str:
     L.append("")
 
     # покрытие
-    L += ["## 9. Покрытие прогона и ограничения", ""]
+    L += ["## 8. Покрытие прогона и ограничения", ""]
     L.append(f"- Обработано строк: {len(doc.lines)}; выделено требований: {len(reqs)}.")
     if result.notes:
         L += ["- Проверки, которые прошли успешно:"] + [f"  - {n}" for n in result.notes]
@@ -362,9 +353,6 @@ def render(result: RunResult, out_path: Path) -> str:
         L.append(f"- ⚠️ **{result.budget_stop}** Дальнейшие LLM-шаги пропущены, отчёт построен по выполненным шагам.")
     for e in result.failures:
         L.append(f"- ⚠️ {e}")
-    for e in result.stats.events:
-        if e != result.budget_stop and not any(e in x for x in result.failures):
-            L.append(f"- ℹ️ {e}")
     if result.mode == "rules-only":
         L.append("- ⚠️ LLM-анализ не выполнялся: смысловые противоречия и пропуски проверены только правилами. "
                  "Добавьте ключ в `.env` для полной проверки.")

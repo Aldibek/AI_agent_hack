@@ -39,7 +39,6 @@ class RunResult(BaseModel):
     dropped_ungrounded: list[Finding] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     priority: list[str] = Field(default_factory=list)
-    checklist: list[dict] = Field(default_factory=list)
     readiness: dict[str, str] = Field(default_factory=dict)
     reviewers: list[ProviderInfo] = Field(default_factory=list)
     reviewer_labels: list[str] = Field(default_factory=list)
@@ -217,12 +216,14 @@ def pick_roles(clients: dict):
     orch = orch_env if orch_env in clients else (reviewers[0] if reviewers else None)
     if judge and judge == orch and len(reviewers) > 1 and not judge_env and not spare:
         judge = reviewers[1]
+    # модель роли подменяем, только если роль досталась тому провайдеру, что указан в .env
+    # (иначе, например, при одном ключе Gemini получили бы запрос claude-sonnet-5-5 к Gemini)
     om = os.getenv("REQAUDIT_ORCH_MODEL", "").strip()
-    if orch and om and om != clients[orch].model:
+    if orch and om and orch == orch_env and om != clients[orch].model:
         clients["orchestrator"] = clients[orch].clone(om)  # оркестратор — своя модель (по умолчанию Sonnet 5.5)
         orch = "orchestrator"
     jm = os.getenv("REQAUDIT_JUDGE_MODEL", "").strip()
-    if judge and jm and jm != clients[judge].model:
+    if judge and jm and judge == judge_env and jm != clients[judge].model:
         clients["judge"] = clients[judge].clone(jm)  # работает для любого провайдера (anthropic, openai, ...)
         judge = "judge"
     return reviewers, orch, judge
@@ -395,7 +396,6 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
                     continue
                 _apply_orch(f, item)
             result.priority = [str(x) for x in (data.get("priority") or []) if str(x) in ids and str(x) not in dup]
-            result.checklist = [c for c in (data.get("checklist") or []) if isinstance(c, dict) and c.get("item")]
             rd = data.get("readiness") or {}
             result.readiness = {str(k): str(v) for k, v in rd.items() if v} if isinstance(rd, dict) else {}
             merged = [f for k, f in ids.items() if k not in dup]
@@ -481,8 +481,11 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
     result.findings = merged
     alive = {id(f) for f in merged}
     result.priority = [f.fid for f in prio_objs if id(f) in alive]
-    for c in result.checklist:
-        c["why"] = _remap_ids(str(c.get("why", "")), alive, ids, dup_map)
+    for f in merged:  # внутренние номера оркестратора C-xx в текстах → итоговые F-xx
+        for fld in ("explanation", "scenario", "impact", "suggestion", "status_note"):
+            val = getattr(f, fld, "")
+            if isinstance(val, str) and "C-" in val:
+                setattr(f, fld, _remap_prose(val, alive, ids, dup_map))
     stats.seconds = time.time() - t0
     if tracker is not None:
         anomaly = tracker.anomaly()
@@ -494,7 +497,8 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
     return result
 
 
-def _remap_ids(text: str, alive: set[int], ids: dict[str, Finding], dup_map: dict[str, str]) -> str:
+def _remap_prose(text: str, alive: set[int], ids: dict[str, Finding], dup_map: dict[str, str]) -> str:
+    """C-xx → F-xx (через цепочку дублей); если находки нет в итоге — «другое замечание»."""
     import re
 
     def repl(m):
@@ -504,11 +508,9 @@ def _remap_ids(text: str, alive: set[int], ids: dict[str, Finding], dup_map: dic
             seen.add(cid)
             cid = dup_map[cid]
         f = ids.get(cid)
-        return f.fid if f is not None and id(f) in alive else ""
+        return f.fid if f is not None and id(f) in alive else "другое замечание"
 
-    out = re.sub(r"C-\d{2,3}", repl, text)
-    out = re.sub(r"(,\s*){2,}", ", ", out)
-    return re.sub(r"^[,:\s]+|(?<=:)\s*,|,\s*(?=:)", "", out).strip()
+    return re.sub(r"\bC-\d{2,3}\b", repl, text)
 
 
 def _apply_orch(f: Finding, item: dict) -> None:

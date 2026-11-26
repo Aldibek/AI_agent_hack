@@ -1,8 +1,7 @@
 """Человек в контуре: ответы на уточняющие вопросы → перепроверка → исправленные формулировки (ТЗ v2).
 
-Режимы:
-- --interactive: агент задаёт главные вопросы в терминале;
-- --answers file: ответы берутся из файла (JSON {"F-01": "ответ"} или строки «F-01: ответ»), прогон повторяем.
+Режим --interactive: агент задаёт главные вопросы в терминале (REQAUDIT_QUESTIONS, по умолчанию 5),
+ответы и перепроверка — в рамках того же прогона.
 """
 
 from __future__ import annotations
@@ -28,22 +27,6 @@ def _ordered_questions(result: RunResult) -> list[Finding]:
     return prio + rest
 
 
-def _load_answers(path: str) -> dict[str, str]:
-    text = Path(path).expanduser().read_text(encoding="utf-8")
-    try:
-        data = json.loads(text)
-        if isinstance(data, dict):
-            return {str(k).strip(): str(v).strip() for k, v in data.items() if str(v).strip()}
-    except json.JSONDecodeError:
-        pass
-    out = {}
-    for line in text.splitlines():
-        m = re.match(r"^\s*([FВB]-?\d+)\s*[:=]\s*(.+)$", line)
-        if m:
-            out[m.group(1).replace("В", "F").replace("B", "F")] = m.group(2).strip().strip('"')
-    return out
-
-
 def _ask(findings: list[Finding], n: int) -> dict[str, str]:
     answers: dict[str, str] = {}
     print("\n=== Уточняющие вопросы (Enter — пропустить, номер — выбрать вариант, или свой ответ) ===", file=sys.stderr)
@@ -64,20 +47,14 @@ def _ask(findings: list[Finding], n: int) -> dict[str, str]:
     return answers
 
 
-def apply_answers(result: RunResult, *, interactive: bool, answers_path: str | None, cache_dir: Path | None) -> None:
+def apply_answers(result: RunResult, *, cache_dir: Path | None) -> None:
     questions = _ordered_questions(result)
     if not questions:
         return
-    answers: dict[str, str] = {}
-    if answers_path:
-        answers.update(_load_answers(answers_path))
-    if interactive:
-        if sys.stdin.isatty():
-            answers.update(_ask([f for f in questions if f.fid not in answers], int(os.getenv("REQAUDIT_QUESTIONS", "5"))))
-            Path("answers.json").write_text(json.dumps(answers, ensure_ascii=False, indent=1), encoding="utf-8")
-            log("ответы сохранены в answers.json (для повторного прогона: --answers answers.json)")
-        else:
-            log("нет интерактивного терминала — вопросы только в отчёте")
+    if not sys.stdin.isatty():
+        log("нет интерактивного терминала — вопросы только в отчёте")
+        return
+    answers = _ask(questions, int(os.getenv("REQAUDIT_QUESTIONS", "5")))
     by_id = {f.fid: f for f in result.findings}
     answers = {k: v for k, v in answers.items() if k in by_id}
     if not answers:

@@ -1,5 +1,5 @@
 """Клиенты LLM: Claude (Anthropic, официальный SDK) и любой OpenAI-совместимый API
-(Gemini, Groq, OpenRouter, OpenAI, Ollama).
+(Gemini — бесплатный ключ AI Studio, OpenAI).
 
 - JSON-режим с автоматическим отключением, если провайдер его не поддерживает;
 - повторы с экспоненциальной задержкой при 429/5xx/таймаутах;
@@ -27,12 +27,9 @@ PROVIDERS = {
     "anthropic": ("Anthropic", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "claude-opus-5-5", "ANTHROPIC_BASE_URL", ""),
     "gemini": ("Google", "GEMINI_API_KEY", "GEMINI_MODEL", "gemini-flash-latest", "GEMINI_BASE_URL",
                "https://generativelanguage.googleapis.com/v1beta/openai"),
-    "groq": ("Groq", "GROQ_API_KEY", "GROQ_MODEL", "llama-3.3-70b-versatile", "GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
-    "openrouter": ("OpenRouter", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "", "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
     "openai": ("OpenAI", "OPENAI_API_KEY", "OPENAI_MODEL", "gpt-4o-mini", "OPENAI_BASE_URL", "https://api.openai.com/v1"),
-    "ollama": ("локальная модель (Ollama)", "", "OLLAMA_MODEL", "", "OLLAMA_BASE_URL", ""),
 }
-PRIORITY = ["anthropic", "gemini", "groq", "openrouter", "openai", "ollama"]
+PRIORITY = ["anthropic", "gemini", "openai"]
 
 
 class LLMError(RuntimeError):
@@ -538,13 +535,7 @@ def available_clients(stats: RunStats, cache_dir: Path | None, tracker=None) -> 
         key = os.getenv(key_env, "").strip() if key_env else ""
         model = os.getenv(model_env, "").strip() or default_model
         base = os.getenv(base_env, "").strip() or default_base
-        if name == "ollama":
-            if not (base and model):
-                continue
-            base = base.rstrip("/")
-            if not base.endswith("/v1") and not base.endswith("/chat/completions"):
-                base += "/v1"
-        elif not key or not model:
+        if not key or not model:
             continue
         if name == "anthropic":
             clients[name] = AnthropicClient(name, company, model, key, stats, cache_dir, tracker=tracker,
