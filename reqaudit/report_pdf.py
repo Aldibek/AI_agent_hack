@@ -127,8 +127,6 @@ def build_html(result: RunResult) -> str:
         rows.append(("Модель-ревьюер", f"{result.reviewers[0].model}, проходов {len(result.reviewer_labels)}"))
     if result.judge:
         rows.append(("Критик", result.judge.model))
-    if (result.costs or {}).get("cost_usd") is not None:
-        rows.append(("Стоимость", f"${result.costs['cost_usd']:.2f}"))
     H.append("<h2>Паспорт прогона</h2>" +
              "".join(f"<p class='row'><span class='muted'>{_c(k)}:</span> {_c(str(val))}</p>" for k, val in rows) +
              "<p class='muted'>Отчёт сформирован агентом ReqAudit автоматически.</p>")

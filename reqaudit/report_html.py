@@ -282,8 +282,6 @@ def render_html(result: RunResult, out_path: Path) -> None:
         rows.append(("Критик", result.judge.model))
     if result.stats.seconds:
         rows.append(("Время", f"{result.stats.seconds / 60:.1f} мин"))
-    if costs.get("cost_usd") is not None:
-        rows.append(("Стоимость", f"${costs['cost_usd']:.2f}"))
     P.append("<h2>Паспорт прогона</h2><table class='passport'>" +
              "".join(f"<tr><td>{e(k)}</td><td>{e(str(val))}</td></tr>" for k, val in rows) + "</table>")
 

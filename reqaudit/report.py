@@ -9,7 +9,6 @@ from datetime import datetime
 from pathlib import Path
 
 from . import __version__
-from .costs import passport_line
 from .criteria import (CATEGORY, INDIVIDUAL, INDIVIDUAL_MAP, PROOF_RU, SET, SET_MAP, SEVERITY_ORDER, SEVERITY_RU,
                        category_ru)
 from .models import Finding, Requirement
@@ -167,12 +166,8 @@ def render(result: RunResult, out_path: Path) -> str:
         L.append(f"| Критик (судья) | {result.judge.company} — `{result.judge.model}` ({ind}) |")
     L.append(f"| Режим | {_mode_line(result)} |")
     s = result.stats
-    L.append(f"| Вызовы LLM | {s.llm_calls} (из кэша: {s.llm_cached}, ошибок: {s.llm_failed}); токены: {s.prompt_tokens} → {s.completion_tokens} |")
-    if result.mode != "rules-only" or result.costs:
-        L.append(f"| Стоимость прогона | {_esc(passport_line(result.costs))} |")
-    if result.budget_stop:
-        L.append(f"| ⚠️ Бюджет | {_esc(result.budget_stop)} |")
-    L.append(f"| Время прогона | {s.seconds:.0f} с |")
+    L.append(f"| Вызовы LLM | {s.llm_calls} (из кэша: {s.llm_cached}, ошибок: {s.llm_failed}) |")
+    L.append(f"| Время прогона | {s.seconds / 60:.1f} мин |")
     L.append("")
 
     # коротко — первая страница: всё, что нужно для решения, без прокрутки

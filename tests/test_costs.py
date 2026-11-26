@@ -461,7 +461,8 @@ class PipelineCostsTest(CostsBase):
         self.assertEqual(result.budget_stop, "")
         self.assertEqual(len(self.ledger()), 4)
         text = render(result, Path(self.tmp.name) / "r.md")
-        self.assertIn("| Стоимость прогона | $", text)
+        self.assertNotIn("Стоимость", text)  # расходы — в report.json и журнале, не в отчёте для читателя
+        self.assertIn("cost_usd", json.dumps(result.costs))
 
     def test_judge_effort(self):
         from reqaudit.pipeline import run
