@@ -22,11 +22,22 @@ BCC-HUB x MNU FinTech Hackathon · задание — [`docs/TASK.md`](docs/TASK
 `Content-Type: application/json` у запроса без тела, «200 Created» вместо 201; ещё 12 существенных и 21 незначительное
 замечание. Проверено каждое из 50 требований. Прогон занял 3 минуты.
 
-**Повторить прогон** (Python 3.11–3.13, ключ `ANTHROPIC_API_KEY` в `.env`, см. [Запуск](#запуск)):
+## Команда для запуска (для жюри)
+
+Нужен Python 3.11–3.13 и ключ Anthropic (Claude).
 
 ```bash
+git clone https://github.com/Aldibek/AI_agent_hack.git && cd AI_agent_hack
+python -m venv .venv && source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env                                     # вписать ANTHROPIC_API_KEY=...
 python -m reqaudit docs/requirements.pdf report.md
 ```
+
+Последняя строка — сам прогон: вход `docs/requirements.pdf` (можно `.md`, `.docx`, `.txt`), выход `report.md`;
+рядом появятся `report.pdf` и `report.html`. Около 3 минут. Без ключа: `python -m reqaudit docs/requirements.pdf report.md --no-llm`
+(только детерминированные правила, меньше секунды). Готовый результат этого прогона уже лежит в
+[`submission/report.pdf`](submission/report.pdf) — запускать для просмотра не нужно.
 
 **Модели:** все шаги с LLM (три прохода ревьюеров, покрытие приёмкой, критик) — **Claude Opus 5.5**
 (`claude-opus-5-5`, effort `medium`) через Anthropic API; остальное — детерминированный код.
