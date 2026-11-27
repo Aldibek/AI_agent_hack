@@ -494,7 +494,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
         if (f.category in ("contradiction", "incorrect") and f.proof == "Д"
                 and (not f.judge or (f.judge == "confirmed" and "тяжесть" not in (f.judge_change or "")))
                 and len({q.line_start for q in f.quotes}) >= 2
-                and (kinds & {"FR", "API", "INT"}) and f.severity != "blocker"):
+                and (kinds & {"FR", "API", "INT", "REQ"}) and f.severity != "blocker"):
             f.severity = "blocker"
             f.status_note = (f.status_note + " " if f.status_note else "") + \
                 "Тяжесть повышена до блокера правилом: доказанное противоречие в функциональных требованиях или контракте API."

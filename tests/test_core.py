@@ -181,3 +181,45 @@ class RulesNotOverfitTest(unittest.TestCase):
         for bad in ("rule:status_undescribed", "rule:card_data", "rule:units"):
             self.assertNotIn(bad, ids)
         self.assertLessEqual(len(ids), 2, ids)
+
+
+class SegmentOtherStructuresTest(unittest.TestCase):
+    """Разделы с нестандартными названиями и многоуровневая нумерация не теряются."""
+
+    def _reqs(self, text: str, name: str = "t.md"):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / name
+            p.write_text(textwrap.dedent(text), encoding="utf-8")
+            doc = load_document(p)
+            return segment(doc)
+
+    def test_security_performance_constraints_kept(self):
+        reqs = self._reqs("""
+            # ТЗ
+            ## Функциональные требования
+            - Система сохраняет заявку.
+            ## Требования к безопасности
+            - Пароли хранятся в виде хэша.
+            - Сессия истекает через 15 минут.
+            ## Требования к производительности
+            - Ответ API не дольше 300 мс.
+            ## Ограничения
+            - Используется только PostgreSQL 15.
+            ## Порядок работ
+            Исполнитель должен передать исходный код до подписания акта.
+            ## Общие сведения
+            Заказчик: учебный.
+            """)
+        texts = " ".join(r.text for r in reqs)
+        for must in ("хэша", "15 минут", "300 мс", "PostgreSQL", "исходный код"):
+            self.assertIn(must, texts)
+        self.assertNotIn("Заказчик", texts)
+
+    def test_multilevel_numbering_is_a_list_item(self):
+        reqs = self._reqs("""
+            # Техническая спецификация
+            ## Требования к услуге
+            2.1. Поставщик обеспечивает доступность 99,9%.
+            2.2. Поставщик должен вести журнал событий.
+            """)
+        self.assertEqual([r.doc_ref for r in reqs], ["п. 2.1", "п. 2.2"])

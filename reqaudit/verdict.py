@@ -5,7 +5,7 @@ from __future__ import annotations
 from .criteria import SEVERITY_ORDER
 from .models import Finding, Requirement
 
-CORE_KINDS = {"FR", "API", "INT", "DATA", "AC", "NFR"}
+CORE_KINDS = {"FR", "API", "INT", "DATA", "AC", "NFR", "REQ"}  # REQ — требование без стандартного раздела
 
 
 def _kinds(f: Finding, reqs_by_id: dict[str, Requirement]) -> set[str]:

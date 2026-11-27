@@ -13,9 +13,11 @@ from .models import Document, Requirement
 
 # (регулярка по названию раздела, тип). Проверяется от самого глубокого заголовка к корню.
 SECTION_KINDS: list[tuple[str, str | None]] = [
-    (r"нефункциональ|non[- ]?functional", "NFR"),
-    (r"функциональн|functional req", "FR"),
-    (r"критери\w*\s+при[её]мк|сценари\w*\s+при[её]мк|при[её]мочн|acceptance|тест-кейс|тестов\w+ сценари", "AC"),
+    (r"нефункциональ|non[- ]?functional|функционалдық емес", "NFR"),
+    (r"безопасн|security|защит\w* (?:информ|данн)|қауіпсіз|производительн|performance|нагрузк|надёжн|надежн"
+     r"|reliability|доступност|availability|эксплуатац|сопровожд|масштабир", "NFR"),
+    (r"функциональн|functional req|функционалдық", "FR"),
+    (r"критери\w*\s+при[её]мк|сценари\w*\s+при[её]мк|при[её]мочн|acceptance|тест-кейс|тестов\w+ сценари|қабылдау", "AC"),
     (r"бизнес-требован|business req", "BR"),
     (r"требования к данным|модель данных|\bdata\b", "DATA"),
     (r"интеграц|integration", "INT"),
@@ -28,10 +30,11 @@ SECTION_KINDS: list[tuple[str, str | None]] = [
     (r"ревью требований|чек-лист", "REVIEW"),
     (r"согласующ|согласован", "APPROVAL"),
     (r"тестирован", "TEST"),
+    (r"ограничени|constraint|допущени|assumption|шектеу|требовани\w* к|талаптар", "REQ"),
     (r"логика|особые правила|параметр|query|path|request|ответ|статус|response|общие параметры"
      r"|rest|\bapi\b|метод|endpoint|схема", "API"),
 ]
-REQ_KINDS = {"FR", "NFR", "AC", "DATA", "INT", "GOAL", "BR", "UI", "ARCH", "PROC", "SEQ", "API"}
+REQ_KINDS = {"REQ", "FR", "NFR", "AC", "DATA", "INT", "GOAL", "BR", "UI", "ARCH", "PROC", "SEQ", "API"}
 NON_REQ_KINDS = {"META", "REVIEW", "APPROVAL", "TEST"}
 
 KIND_RU = {
@@ -40,7 +43,10 @@ KIND_RU = {
     "SEQ": "взаимодействие", "API": "API", "REQ": "требование",
 }
 
-LIST_RE = re.compile(r"^\s*(?:[*\-+•]|(\d+)[.)])\s+(.*)$")
+LIST_RE = re.compile(r"^\s*(?:[*\-+•]|(\d+(?:\.\d+)+\.?|\d+[.)]))\s+(.*)$")  # «-», «1.», «1)», «2.3», «2.3.1.»
+# модальность требования: пункт из нераспознанного раздела остаётся требованием, если он что-то предписывает
+MODAL_RE = re.compile(r"(?<!\w)(?:долж(?:ен|на|но|ны)|обязан\w*|обеспечива\w*|обеспечит\w*|необходимо|требуется|не допуска\w*"
+                      r"|запрещ\w*|предусм\w*|shall|must|тиіс|қажет|міндетті|қамтамасыз)(?!\w)", re.I)
 ID_RE = re.compile(r"^\W*((?:[А-ЯЁA-Z]{1,5})[-–]\d+(?:\.\d+)*)\b")
 TABLE_SEP_RE = re.compile(r"^\|?\s*:?-{2,}")
 
@@ -141,6 +147,8 @@ def segment(doc: Document) -> list[Requirement]:
     for (ls, le, text, utype, extra), kind in zip(units, kinds):
         section = doc.lines[ls - 1].section
         if structured:
+            if kind is None and MODAL_RE.search(text):
+                kind = "REQ"  # раздел не распознан (не стандартное название), но пункт предписывает — проверяем
             if kind not in REQ_KINDS:
                 continue
         else:
@@ -183,7 +191,8 @@ def segment(doc: Document) -> list[Requirement]:
                 doc_ref = idm.group(1).replace("–", "-")
             elif extra and extra.get("num"):
                 last = section.split(">")[-1].strip() or "список"
-                doc_ref = f"{last}, п. {extra['num']}"
+                num = extra["num"].rstrip(".)")
+                doc_ref = f"п. {num}" if "." in num else f"{last}, п. {num}"
             body = item
         else:
             idm = ID_RE.match(text)
