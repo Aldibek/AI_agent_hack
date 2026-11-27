@@ -26,6 +26,10 @@ BCC-HUB x MNU FinTech Hackathon · задание — [`docs/TASK.md`](docs/TASK
 
 ## Архитектура
 
+![Архитектура ReqAudit](docs/architecture.png)
+
+<details><summary>Тот же граф в Mermaid</summary>
+
 ```mermaid
 flowchart TD
     IN([Документ: PDF, скан, DOCX, MD]) --> ING[1 · Текст и номера строк<br/><i>код + OCR</i>]
@@ -44,7 +48,7 @@ flowchart TD
     MRG --> CR[7 · Критик опровергает находки<br/><i>Claude</i>]
     CR --> VER[8 · Вердикт по правилу<br/><i>код</i>]
     VER --> OUT([Заключение: MD, PDF, HTML, JSON])
-    CR -. --interactive .-> HUM[Человек: до 3 вопросов]
+    CR -. флаг interactive .-> HUM[Человек: до 3 вопросов]
     HUM -.-> VER
     classDef llm fill:#eef1ff,stroke:#3d5afe,color:#1b1b1d
     classDef code fill:#f3f1ec,stroke:#9a978f,color:#1b1b1d
@@ -55,6 +59,8 @@ flowchart TD
     class IN,OUT io
     class HUM human
 ```
+
+</details>
 
 <sub>Синие блоки — Claude Opus 5.5, серые — детерминированный код, пунктир — необязательный шаг.</sub>
 
