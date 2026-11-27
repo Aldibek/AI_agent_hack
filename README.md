@@ -35,12 +35,12 @@ python -m reqaudit docs/requirements.pdf report.md
 ```
 
 Последняя строка — сам прогон: вход `docs/requirements.pdf` (можно `.md`, `.docx`, `.txt`), выход `report.md`;
-рядом появятся `report.pdf` и `report.html`. Около 3 минут. Без ключа: `python -m reqaudit docs/requirements.pdf report.md --no-llm`
+рядом появятся `report.pdf` и `report.html`. Около 4–5 минут. Без ключа: `python -m reqaudit docs/requirements.pdf report.md --no-llm`
 (только детерминированные правила, меньше секунды). Готовый результат этого прогона уже лежит в
 [`submission/report.pdf`](submission/report.pdf) — запускать для просмотра не нужно.
 
 **Модели:** все шаги с LLM (пять запусков ревьюеров, покрытие приёмкой, критик) — **Claude Opus 5.5**
-(`claude-opus-5-5`, effort `medium`) через Anthropic API; остальное — детерминированный код.
+(`claude-opus-5-5`, effort `high`) через Anthropic API; остальное — детерминированный код.
 
 ## Архитектура
 
@@ -116,7 +116,7 @@ python -m reqaudit docs/requirements.pdf reports/report.md
 ```
 
 Рядом с `reports/report.md` появятся `report.pdf`, `report.html`, `report.json` и `report.source.txt`
-(текст документа с номерами строк, на которые ссылается отчёт). Обычно 2–3 минуты.
+(текст документа с номерами строк, на которые ссылается отчёт). Обычно 4–5 минут.
 
 | Флаг | Что делает |
 | :--- | :--- |
@@ -144,8 +144,8 @@ streamlit run streamlit_app.py                           # http://localhost:8501
 | :--- | :--- | :--- |
 | `ANTHROPIC_API_KEY` | — | ключ Claude: <https://platform.claude.com/settings/keys> (основной вариант) |
 | `GEMINI_API_KEY` | — | бесплатная альтернатива: <https://aistudio.google.com/apikey>; с одним этим ключом агент работает целиком на Gemini |
-| `ANTHROPIC_MODEL` / `ANTHROPIC_EFFORT` | `claude-opus-5-5` / `medium` | модель и глубина рассуждения ревьюеров |
-| `REQAUDIT_JUDGE_MODEL` / `REQAUDIT_JUDGE_EFFORT` | `claude-opus-5-5` / `medium` | модель критика |
+| `ANTHROPIC_MODEL` / `ANTHROPIC_EFFORT` | `claude-opus-5-5` / `high` | модель и глубина рассуждения ревьюеров |
+| `REQAUDIT_JUDGE_MODEL` / `REQAUDIT_JUDGE_EFFORT` | `claude-opus-5-5` / `high` | модель критика |
 
 Один полный прогон на документе такого размера стоит $1–2.
 

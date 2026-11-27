@@ -152,7 +152,7 @@ class Progress:
                        f"{ic[v['state']]}</span><span class='t'>{v['name']}</span><span class='d'>{v['detail']}</span></div>"
                        for k, v in self.steps.items())
         sec = int(time.time() - self.t0)
-        hint = "" if final or self.fast else "обычно 2–3 минуты"
+        hint = "" if final or self.fast else "обычно 4–5 минут"
         self.box.markdown(f"<div class='steps'>{rows}<div class='clock'><span>{'Заняло' if final else 'Прошло'} "
                           f"{sec // 60}:{sec % 60:02d}</span><span>{hint}</span></div></div>", unsafe_allow_html=True)
 
@@ -411,7 +411,7 @@ tab_new, tab_sample = st.tabs(["Проверить свой документ", "
 with tab_new:
     up = st.file_uploader("Документ требований", type=["pdf", "docx", "md", "txt"],
                           help="PDF (в том числе сканы — распознаются автоматически), DOCX, Markdown или текст; до 25 МБ")
-    mode = st.radio("Режим", ["Полная проверка — Claude Opus 5.5, обычно 2–3 минуты",
+    mode = st.radio("Режим", ["Полная проверка — Claude Opus 5.5, обычно 4–5 минут",
                               "Быстрая — только детерминированные правила, мгновенно"], index=0)
     fast = mode.startswith("Быстрая")
     has_key = any(os.environ.get(k) for k in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY"))
