@@ -430,7 +430,7 @@ def _question_line(i: int, f: Finding) -> list[str]:
 
 def write_trace(result: RunResult, path: Path) -> None:
     data = result.model_dump(mode="json")
-    data["doc"] = {k: v for k, v in data["doc"].items() if k != "lines"}
+    # текст документа остаётся в следе: по нему перепроверяются ответы автора (python -m reqaudit.clarify)
     data["doc"]["path"] = data["doc"].get("name", "")  # без локальных путей пользователя
     costs = data.get("costs") or {}
     for k in ("ledger", "daily_spent_usd", "budget_run_usd", "budget_daily_usd"):

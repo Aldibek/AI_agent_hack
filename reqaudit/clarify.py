@@ -1,7 +1,11 @@
 """Человек в контуре: ответы на уточняющие вопросы → перепроверка → исправленные формулировки (ТЗ v2).
 
-Режим --interactive: агент задаёт главные вопросы в терминале (REQAUDIT_QUESTIONS, по умолчанию 5),
-ответы и перепроверка — в рамках того же прогона.
+Где агент не уверен (критик спорит, блокер без ответа в документе, нашёл один проход), он спрашивает человека —
+не больше REQAUDIT_QUESTIONS вопросов (по умолчанию 3). Ответы перепроверяются отдельным вызовом модели: находка
+снимается, подтверждается или получает исправленную формулировку («ТЗ v2»), вердикт пересчитывается.
+
+- в терминале: python -m reqaudit doc.md out.md --interactive
+- в веб-приложении: кнопки-варианты → python -m reqaudit.clarify report.json answers.json out/report.md
 """
 
 from __future__ import annotations
@@ -54,6 +58,15 @@ def _ordered_questions(result: RunResult) -> list[tuple[Finding, list[str]]]:
     return [(f, why) for *_, f, why in scored]
 
 
+def question_limit() -> int:
+    return max(1, min(int(os.getenv("REQAUDIT_QUESTIONS", "3")), 10))
+
+
+def pending_questions(result: RunResult, n: int | None = None) -> list[tuple[Finding, list[str]]]:
+    """Вопросы, которые агент задал бы человеку: только там, где он не уверен, не больше лимита."""
+    return _ordered_questions(result)[: n or question_limit()]
+
+
 def _ask(questions: list[tuple[Finding, list[str]]], n: int) -> dict[str, str]:
     answers: dict[str, str] = {}
     asked = questions[:n]
@@ -80,18 +93,19 @@ def _ask(questions: list[tuple[Finding, list[str]]], n: int) -> dict[str, str]:
     return answers
 
 
-def apply_answers(result: RunResult, *, cache_dir: Path | None) -> None:
-    questions = _ordered_questions(result)
-    if not questions:
-        log("агент уверен во всех находках — уточнять у автора нечего")
-        return
-    if not sys.stdin.isatty():
-        log("нет интерактивного терминала — вопросы только в отчёте")
-        return
-    limit = max(1, min(int(os.getenv("REQAUDIT_QUESTIONS", "3")), 10))
-    answers = _ask(questions, limit)
+def apply_answers(result: RunResult, *, cache_dir: Path | None, answers: dict[str, str] | None = None) -> None:
+    """Ответы автора → перепроверка. answers=None — спросить в терминале; иначе ответы уже собраны (веб-приложение)."""
+    if answers is None:
+        questions = _ordered_questions(result)
+        if not questions:
+            log("агент уверен во всех находках — уточнять у автора нечего")
+            return
+        if not sys.stdin.isatty():
+            log("нет интерактивного терминала — вопросы только в отчёте")
+            return
+        answers = _ask(questions, question_limit())
     by_id = {f.fid: f for f in result.findings}
-    answers = {k: v for k, v in answers.items() if k in by_id}
+    answers = {k: v.strip() for k, v in answers.items() if k in by_id and v and v.strip()}
     if not answers:
         return
     items = [{"id": fid, "title": by_id[fid].title, "explanation": by_id[fid].explanation[:500],
@@ -150,3 +164,51 @@ def apply_answers(result: RunResult, *, cache_dir: Path | None) -> None:
     if removed:
         result.rejected.extend(removed)
         result.findings = [f for f in result.findings if f not in removed]
+
+
+def main(argv: list[str] | None = None) -> int:
+    """python -m reqaudit.clarify <report.json> <answers.json> <новый report.md> — перепроверка по ответам автора."""
+    import argparse
+
+    from dotenv import load_dotenv
+
+    root = Path(__file__).resolve().parent.parent
+    load_dotenv(Path.cwd() / ".env")
+    load_dotenv(root / ".env")
+    p = argparse.ArgumentParser(prog="reqaudit.clarify", description="Перепроверка находок по ответам автора ТЗ")
+    p.add_argument("trace", help="report.json первого прогона")
+    p.add_argument("answers", help='JSON {"F-01": "ответ", ...}')
+    p.add_argument("output", help="куда записать обновлённый отчёт (.md; рядом .json/.html/.pdf)")
+    args = p.parse_args(argv)
+
+    from .report import render, write_source, write_trace
+    from .report_html import render_html
+
+    result = RunResult.model_validate_json(Path(args.trace).read_text(encoding="utf-8"))
+    if not result.doc.lines:
+        print("Ошибка: в report.json нет текста документа — перезапустите проверку новой версией агента.", file=sys.stderr)
+        return 2
+    answers = json.loads(Path(args.answers).read_text(encoding="utf-8"))
+    before = dict(result.costs or {})
+    costs.start_run(document=result.doc.name, stats=result.stats, log=log)
+    apply_answers(result, cache_dir=None, answers=answers)
+    extra = (result.costs or {}).get("cost_usd") or 0
+    result.costs = {**before, "cost_usd": round((before.get("cost_usd") or 0) + extra, 6)}
+    out = Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    render(result, out)
+    write_trace(result, out.with_suffix(".json"))
+    write_source(result, out.with_suffix(".source.txt"))
+    try:
+        from .report_pdf import render_pdf
+
+        render_pdf(result, out.with_suffix(".pdf"))
+    except Exception as e:  # noqa: BLE001
+        print(f"Внимание: PDF не создан ({e})", file=sys.stderr)
+    render_html(result, out.with_suffix(".html"))
+    log(f"перепроверено ответов: {len(result.answers)}; отчёт: {out}")
+    return 0 if result.steps.get("answers") == "ok" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

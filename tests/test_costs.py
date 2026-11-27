@@ -763,6 +763,27 @@ class HumanInLoopTest(CostsBase):
         self.assertEqual(len(sdk.requests), 1)  # одна перепроверка на все ответы
 
 
+    def test_answers_from_app_without_terminal(self):
+        """Веб-приложение передаёт готовые ответы: терминал не нужен, пустые ответы пропускаются."""
+        from reqaudit import clarify
+
+        res = self._result()
+        self.assertEqual([f.fid for f, _ in clarify.pending_questions(res)], ["F-03", "F-02", "F-04"])
+
+        def answer(kw):
+            return json.dumps({"updates": [{"id": "F-03", "status": "resolved", "rewrite": "Push уходит за 5 с."}]},
+                              ensure_ascii=False)
+
+        sdk = FakeSDK(text=answer)
+        costs.start_run(document="h.md", stats=res.stats, log=lambda m: None)
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "k"}), \
+                mock.patch("anthropic.Anthropic", return_value=sdk), \
+                mock.patch("builtins.input", side_effect=AssertionError("терминал не должен спрашивать")):
+            clarify.apply_answers(res, cache_dir=None, answers={"F-03": "Да, 5 секунд", "F-04": "  "})
+        self.assertEqual([a["fid"] for a in res.answers], ["F-03"])
+        self.assertEqual({f.fid: f for f in res.findings}["F-03"].suggestion, "Push уходит за 5 с.")
+
+
 class RoleModelTest(unittest.TestCase):
     def test_role_model_not_applied_to_other_provider(self):
         from reqaudit.llm import LLMClient

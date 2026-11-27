@@ -210,7 +210,92 @@ def show(out_dir: Path, title: str) -> None:
         if f.exists():
             col.download_button(name, f.read_bytes(), file_name=f"reqaudit_report.{ext}", mime=mime,
                                 width="stretch", key=f"{out_dir.name}-{ext}")
+    if data.get("answers"):
+        answered(data)
+    else:
+        clarify_block(out_dir, data)
     conclusion(data, findings, reqs, v)
+
+
+ANS_STYLE = {"решение получено": "success", "снято": "info", "частично": "warning", "остаётся": "warning"}
+
+
+def answered(data: dict) -> None:
+    """Итог перепроверки: что стало с каждой находкой после ответа автора, и исправленная формулировка."""
+    st.subheader("Ответы автора и перепроверка")
+    st.caption("Агент перепроверил свои находки по ответам: вердикт и замечания ниже уже пересчитаны.")
+    for a in data["answers"]:
+        with st.container(border=True):
+            st.markdown(f"**{a.get('fid')}** · {_md(a.get('question', ''))}")
+            st.markdown(f"Ответ: *{_md(a.get('answer', ''))}*")
+            status = a.get("status", "")
+            kind = next((k for w, k in ANS_STYLE.items() if status.startswith(w)), "info")
+            getattr(st, kind)(status.capitalize())
+            if a.get("rewrite"):
+                st.markdown(f"**ТЗ v2:** {_md(a['rewrite'])}")
+            if a.get("new_issue"):
+                st.warning(f"Новый вопрос: {_md(a['new_issue'])}")
+
+
+def clarify_block(out_dir: Path, data: dict) -> None:
+    """Человек в контуре: агент спрашивает там, где не уверен, и перепроверяет себя по ответам."""
+    from reqaudit.clarify import pending_questions
+    from reqaudit.pipeline import RunResult
+
+    doc = dict(data["doc"])
+    has_text = bool(doc.get("lines"))
+    doc.setdefault("lines", [])
+    try:
+        qs = pending_questions(RunResult.model_validate({**data, "doc": doc}))
+    except Exception:  # noqa: BLE001 — старый формат следа
+        qs = []
+    if not qs:
+        return
+    st.subheader("Агент не уверен — уточните")
+    st.caption(f"Здесь агенту не хватает решения автора ТЗ ({len(qs)} из {len(data['findings'])} замечаний). "
+               "Ответьте — он перепроверит эти находки, предложит исправленную формулировку и пересчитает вердикт.")
+    answers: dict[str, str] = {}
+    with st.form(f"clarify-{out_dir.name}"):
+        for k, (f, why) in enumerate(qs, start=1):
+            q = f.question
+            st.markdown(f"**{k}. {_md(q.text)}**")
+            st.caption(f"{f.fid} · {_md(f.title)} · почему спрашиваю: {'; '.join(why)}"
+                       + (f" · кому: {q.addressee}" if q.addressee else ""))
+            for qt in f.quotes[:2]:
+                st.markdown(f"> {_md(qt.text[:200])}  \n> <small>строка {qt.line_start}</small>", unsafe_allow_html=True)
+            opts = ["— пропустить —"] + list(q.options[:5]) + ["Свой ответ"]
+            pick = st.radio("Ответ", opts, key=f"{out_dir.name}-{f.fid}-pick", label_visibility="collapsed")
+            own = st.text_input("Свой ответ", key=f"{out_dir.name}-{f.fid}-own", label_visibility="collapsed",
+                                placeholder="Свой ответ (если выбран «Свой ответ»)")
+            if pick == "Свой ответ":
+                answers[f.fid] = own
+            elif not pick.startswith("—"):
+                answers[f.fid] = pick
+        has_key = any(os.environ.get(x) for x in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY"))
+        go = st.form_submit_button("Перепроверить с ответами", type="primary", disabled=not (has_key and has_text))
+    if not has_key:
+        st.caption("Перепроверка доступна, когда задан ключ модели.")
+    elif not has_text:
+        st.caption("Этот отчёт сделан старой версией агента — запустите проверку заново, чтобы ответить на вопросы.")
+    if go:
+        answers = {k: v for k, v in answers.items() if v and v.strip()}
+        if not answers:
+            st.warning("Выберите хотя бы один ответ.")
+            return
+        new_dir = RUNS / (time.strftime("%Y%m%d-%H%M%S-") + "v2-" + uuid.uuid4().hex[:6])
+        new_dir.mkdir(parents=True, exist_ok=True)
+        (new_dir / "answers.json").write_text(json.dumps(answers, ensure_ascii=False), encoding="utf-8")
+        with st.spinner("Агент перепроверяет находки по ответам…"):
+            proc = subprocess.run([sys.executable, "-m", "reqaudit.clarify", str(out_dir / "report.json"),
+                                   str(new_dir / "answers.json"), str(new_dir / "report.md")], cwd=str(ROOT),
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace", env=os.environ.copy())
+        if not (new_dir / "report.json").exists():
+            st.error("Перепроверка не удалась.")
+            st.code("\n".join(l for l in proc.stderr.splitlines() if not HIDDEN.search(l))[-2000:] or "—", language=None)
+            return
+        st.session_state["last"] = (str(new_dir), f"{doc.get('name', 'документ')} · после ответов автора")
+        st.session_state["tab_hint"] = True
+        st.rerun()
 
 
 SEV_ICON = {"blocker": "🔴", "major": "🟠", "minor": "🟡"}
@@ -348,6 +433,7 @@ with tab_sample:
              "полная проверка Claude Opus 5.5. Открывается мгновенно.")
     if (SAMPLE_REPORT / "report.json").exists():
         show(SAMPLE_REPORT, "Уведомление о расходах по карте · requirements.md")
+        st.caption("Ответы на вопросы агента откроют перепроверенное заключение во вкладке «Проверить свой документ».")
     else:
         st.info("Готового отчёта нет: запустите `python -m reqaudit docs/requirements.md submission/report.md`.")
 
