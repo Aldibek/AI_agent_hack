@@ -568,12 +568,34 @@ def rule_card_data(doc: Document, reqs: list[Requirement]) -> list[Finding]:
                                  addressee="ИБ"))]
 
 
+INJECTION_RE = re.compile(
+    r"ignore (?:all |the )?(?:previous|prior|above) (?:instructions|prompts?)|disregard (?:all |the )?(?:previous|above)"
+    r"|игнорируй\w* (?:все |предыдущ\w* |прошл\w* )*(?:инструкц|указани|правил)|забудь (?:все )?(?:инструкц|указани|правил)"
+    r"|(?:ии|ai|llm|нейросет\w*|модель|ревьюер|reviewer|assistant|ассистент)[\s,:-]+(?:верни|выведи|ответь|напиши|return|output|respond)"
+    r"|(?:верни|return)\s+(?:пуст\w+|empty)\s+(?:список|массив|findings|list|ответ)|<<<\s*document|document\s*>>>"
+    r"|system prompt|системн\w+ промпт|ты\s*[—-]\s*(?:ии|ai|ассистент|языков\w+ модел)", re.I)
+
+
+def rule_injection(doc: Document, reqs: list[Requirement]) -> list[Finding]:
+    """Текст, обращённый к ИИ-проверяющему, — попытка подавить или подменить проверку (prompt injection)."""
+    hits = [ln.n for ln in doc.lines if INJECTION_RE.search(_strip_md(ln.text))]
+    if not hits:
+        return []
+    return [_f("prompt_injection", "security", "blocker", "Д", "В документе есть указания для ИИ-проверяющего",
+               "Строки документа обращаются к модели-проверяющему («игнорируй инструкции», «верни пустой список» и т.п.). "
+               "Требования так не формулируются; это попытка подменить результат автоматической проверки. "
+               "Агент читает документ как данные, но выводы по таким разделам нужно перепроверить вручную.",
+               [_q(doc, n) for n in hits[:3]],
+               suggestion="Удалить из документа текст, адресованный ИИ; выяснить у автора его происхождение.",
+               impact="Автоматическая проверка может пропустить дефекты или выдать ложное «без замечаний».")]
+
+
 def run_rules(doc: Document, reqs: list[Requirement]) -> tuple[list[Finding], list[str]]:
     findings: list[Finding] = []
     notes: list[str] = []
     for rule in (rule_placeholders, rule_checklist_and_empty_tables, rule_weak_words, rule_http, rule_status_codes,
                  rule_units, rule_timezone, rule_boundaries, rule_version, rule_traceability, rule_data_model,
-                 rule_glossary, rule_rollback, rule_card_data, rule_term_drift):
+                 rule_glossary, rule_rollback, rule_card_data, rule_term_drift, rule_injection):
         try:
             findings.extend(rule(doc, reqs))
         except Exception as e:  # правило не должно ронять прогон
