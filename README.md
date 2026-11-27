@@ -44,6 +44,10 @@ python -m reqaudit docs/requirements.pdf report.md
 
 ## Архитектура
 
+Конвейер собран как граф **LangGraph** (`StateGraph` в [`reqaudit/pipeline.py`](reqaudit/pipeline.py)): узлы
+`ingest → review → merge → critic → finalize`, переход к критику условный — если находок нет или LLM недоступна,
+граф идёт сразу в `finalize`. Пройденный путь записывается в `report.json` (`steps.graph`).
+
 ![Архитектура ReqAudit](docs/architecture.png)
 
 <details><summary>Тот же граф в Mermaid</summary>

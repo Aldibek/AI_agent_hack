@@ -248,278 +248,321 @@ def finalize_costs(result: RunResult, tracker) -> None:
 
 
 def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
-        force_budget: bool = False) -> RunResult:
+        force_budget = False) -> RunResult:
+    """Проверка документа как граф LangGraph: узлы — шаги конвейера, общее состояние — результат прогона.
+
+    ingest (текст, нарезка, правила) → review (5 ревьюеров параллельно + покрытие приёмкой, проверка цитат)
+    → merge (склейка) → critic (опровержение; пропускается, если нечего проверять) → finalize (калибровка, вердикт).
+    """
+    from langgraph.graph import END, START, StateGraph
+
+    _label = ac_future = ac_pass = ac_rids = alive = all_findings = anomaly = blocked = by_id = changes = cid = cites_line = client = clients = d_of = data = doc = down = dup = dup_map = e = est = ex = f = fld = foci = focus = focus_env = fut = futures = grounder = i = ids = judge = judge_name = kept = kind_by_rid = kinds = kinds_of = label = llm_votes = merged = n_llm_voters = n_var = name = new_proof = new_sev = notes = numbered = ok_rev = payload = planned = prio_objs = protected = q = raw_cov = reqs = result = review = reviewers = rule_findings = seen_q = stats = t = t0 = tasks = tgt = tracker = unpriced = user = v = val = verdict = vote = None
     t0 = time.time()
-    stats = RunStats()
-    doc = load_document(doc_path)
-    log(f"документ: {doc.name}, строк: {len(doc.lines)}" + (f", страниц: {doc.pages}" if doc.pages else ""))
-    reqs = segment(doc)
-    log(f"нарезка: {len(reqs)} требований")
-    rule_findings, notes = run_rules(doc, reqs)
-    log(f"правила: {len(rule_findings)} находок")
-    grounder = Grounder(doc, reqs)
-    result = RunResult(doc=doc, reqs=reqs, findings=[], notes=notes, stats=stats)
-    all_findings: list[Finding] = []
-    for f in rule_findings:
-        if grounder.ground(f):
-            all_findings.append(f)
-        else:
-            result.dropped_ungrounded.append(f)
 
-    tracker = costs.start_run(document=doc.name, stats=stats, log=log) if use_llm else None
-    clients = available_clients(stats, cache_dir, tracker=tracker) if use_llm else {}
-    if use_llm and not clients:
-        log("LLM-ключи не найдены — работаю только на правилах (см. .env.example)")
-    if not clients:
-        result.mode = "rules-only"
-    else:
-        reviewers, judge_name = pick_roles(clients)
-        tasks = []
-        for i, name in enumerate(reviewers):
-            focus_env = os.getenv(f"{name.upper()}_FOCUS", "").strip()
-            n_var = os.getenv(f"{name.upper()}_VARIANTS") or os.getenv("REQAUDIT_VARIANTS")
-            if focus_env:
-                foci = [int(x) for x in focus_env.split(",") if x.strip().isdigit() and int(x) in prompts.FOCUS]
-            elif n_var:
-                foci = [prompts.PASSES[(i + v) % len(prompts.PASSES)] for v in range(int(n_var))]
+    def n_ingest(state: dict) -> dict:
+        """Текст с номерами строк, нарезка на требования, детерминированные правила, проверка их цитат."""
+        nonlocal _label, ac_future, ac_pass, ac_rids, alive, all_findings, anomaly, blocked, by_id, changes, cid, cites_line, client, clients, d_of, data, doc, down, dup, dup_map, e, est, ex, f, fld, foci, focus, focus_env, fut, futures, grounder, i, ids, judge, judge_name, kept, kind_by_rid, kinds, kinds_of, label, llm_votes, merged, n_llm_voters, n_var, name, new_proof, new_sev, notes, numbered, ok_rev, payload, planned, prio_objs, protected, q, raw_cov, reqs, result, review, reviewers, rule_findings, seen_q, stats, t, t0, tasks, tgt, tracker, unpriced, user, v, val, verdict, vote
+        stats = RunStats()
+        doc = load_document(doc_path)
+        log(f"документ: {doc.name}, строк: {len(doc.lines)}" + (f", страниц: {doc.pages}" if doc.pages else ""))
+        reqs = segment(doc)
+        log(f"нарезка: {len(reqs)} требований")
+        rule_findings, notes = run_rules(doc, reqs)
+        log(f"правила: {len(rule_findings)} находок")
+        grounder = Grounder(doc, reqs)
+        result = RunResult(doc=doc, reqs=reqs, findings=[], notes=notes, stats=stats)
+        all_findings = []
+        for f in rule_findings:
+            if grounder.ground(f):
+                all_findings.append(f)
             else:
-                # по умолчанию три прохода (каждое требование / 5 ролей / два разработчика) делятся между ревьюерами
-                foci = [f for k, f in enumerate(prompts.PASSES) if k % len(reviewers) == i]
-            for v, focus in enumerate(foci):
-                label = name if len(foci) == 1 else f"{name}#{v + 1}"
-                tasks.append((clients[name], focus, label))
-        result.reviewers = [clients[n].info for n in reviewers]
-        result.reviewer_labels = [t[2] for t in tasks]
-        numbered = doc.numbered_text()
-        if len(numbered) > 150_000:
-            result.failures.append(f"Документ большой ({len(numbered)} символов): модели получают его целиком, "
-                                   "возможна неполнота анализа удалённых разделов.")
-        user = prompts.reviewer_user(req_table(reqs), numbered)
+                result.dropped_ungrounded.append(f)
+        return {"trail": state.get("trail", []) + ["ingest"]}
 
-        # ---- предварительная оценка стоимости прогона
-        planned = []
-        for client, focus, _label in tasks:
-            planned.append((client.model, "reviewer", len(prompts.reviewer_system(focus)) + len(user)))
-        planned.append((clients[judge_name].model, "judge",
-                        len(prompts.JUDGE_SYSTEM) + len(prompts.judge_user("", numbered)) + 40_000))
-        est, unpriced = tracker.preflight(planned)
-        log(f"оценка стоимости прогона: ${est:.2f} за {len(planned)} вызовов"
-            + (f" (+ н/д для {', '.join(unpriced)})" if unpriced else "")
-            + (f"; бюджет прогона ${tracker.run_limit:.2f}" if tracker.run_limit >= 0 else ""))
-        if tracker.run_limit >= 0 and est > tracker.run_limit and not force_budget:
-            raise BudgetExceeded(f"Оценка стоимости прогона {costs.fmt_usd(est)} превышает бюджет REQAUDIT_BUDGET_USD="
-                                 f"{costs.fmt_usd(tracker.run_limit)}. Прогон не начат; увеличьте бюджет или запустите "
-                                 f"с --force-budget.", limit_usd=tracker.run_limit, preflight=True)
-        log(f"консилиум: {', '.join(t[2] for t in tasks)} (параллельно)")
+    def n_review(state: dict) -> dict:
+        """Пять независимых ревьюеров и покрытие критериями приёмки параллельно; цитаты сверяет код."""
+        nonlocal _label, ac_future, ac_pass, ac_rids, alive, all_findings, anomaly, blocked, by_id, changes, cid, cites_line, client, clients, d_of, data, doc, down, dup, dup_map, e, est, ex, f, fld, foci, focus, focus_env, fut, futures, grounder, i, ids, judge, judge_name, kept, kind_by_rid, kinds, kinds_of, label, llm_votes, merged, n_llm_voters, n_var, name, new_proof, new_sev, notes, numbered, ok_rev, payload, planned, prio_objs, protected, q, raw_cov, reqs, result, review, reviewers, rule_findings, seen_q, stats, t, t0, tasks, tgt, tracker, unpriced, user, v, val, verdict, vote
+        tracker = costs.start_run(document=doc.name, stats=stats, log=log) if use_llm else None
+        clients = available_clients(stats, cache_dir, tracker=tracker) if use_llm else {}
+        if use_llm and not clients:
+            log("LLM-ключи не найдены — работаю только на правилах (см. .env.example)")
+        if not clients:
+            result.mode = "rules-only"
+        else:
+            reviewers, judge_name = pick_roles(clients)
+            tasks = []
+            for i, name in enumerate(reviewers):
+                focus_env = os.getenv(f"{name.upper()}_FOCUS", "").strip()
+                n_var = os.getenv(f"{name.upper()}_VARIANTS") or os.getenv("REQAUDIT_VARIANTS")
+                if focus_env:
+                    foci = [int(x) for x in focus_env.split(",") if x.strip().isdigit() and int(x) in prompts.FOCUS]
+                elif n_var:
+                    foci = [prompts.PASSES[(i + v) % len(prompts.PASSES)] for v in range(int(n_var))]
+                else:
+                    # по умолчанию три прохода (каждое требование / 5 ролей / два разработчика) делятся между ревьюерами
+                    foci = [f for k, f in enumerate(prompts.PASSES) if k % len(reviewers) == i]
+                for v, focus in enumerate(foci):
+                    label = name if len(foci) == 1 else f"{name}#{v + 1}"
+                    tasks.append((clients[name], focus, label))
+            result.reviewers = [clients[n].info for n in reviewers]
+            result.reviewer_labels = [t[2] for t in tasks]
+            numbered = doc.numbered_text()
+            if len(numbered) > 150_000:
+                result.failures.append(f"Документ большой ({len(numbered)} символов): модели получают его целиком, "
+                                       "возможна неполнота анализа удалённых разделов.")
+            user = prompts.reviewer_user(req_table(reqs), numbered)
 
-        raw_cov: dict[str, list] = {}  # покрытие по требованиям от прохода 0: метка прохода → тройки
-        ac_rids = [r.rid for r in reqs if r.kind == "AC"]
+            # ---- предварительная оценка стоимости прогона
+            planned = []
+            for client, focus, _label in tasks:
+                planned.append((client.model, "reviewer", len(prompts.reviewer_system(focus)) + len(user)))
+            planned.append((clients[judge_name].model, "judge",
+                            len(prompts.JUDGE_SYSTEM) + len(prompts.judge_user("", numbered)) + 40_000))
+            est, unpriced = tracker.preflight(planned)
+            log(f"оценка стоимости прогона: ${est:.2f} за {len(planned)} вызовов"
+                + (f" (+ н/д для {', '.join(unpriced)})" if unpriced else "")
+                + (f"; бюджет прогона ${tracker.run_limit:.2f}" if tracker.run_limit >= 0 else ""))
+            if tracker.run_limit >= 0 and est > tracker.run_limit and not force_budget:
+                raise BudgetExceeded(f"Оценка стоимости прогона {costs.fmt_usd(est)} превышает бюджет REQAUDIT_BUDGET_USD="
+                                     f"{costs.fmt_usd(tracker.run_limit)}. Прогон не начат; увеличьте бюджет или запустите "
+                                     f"с --force-budget.", limit_usd=tracker.run_limit, preflight=True)
+            log(f"консилиум: {', '.join(t[2] for t in tasks)} (параллельно)")
 
-        def ac_pass():
-            """Какие требования проверяются критериями приёмки и чего не хватает (параллельно ревьюерам)."""
-            started = time.time()
-            client = clients[reviewers[0]]
-            data = client.chat_json(prompts.AC_SYSTEM, user, max_tokens=24000, role="coverage",
-                                    deadline=float(os.getenv("REQAUDIT_REVIEW_DEADLINE", "0")))
-            known = {r.rid: r for r in reqs}
-            rows = []
-            for it in data.get("ac_coverage") or []:
-                if not isinstance(it, dict) or str(it.get("rid")) not in known:
-                    continue
-                rid = str(it["rid"])
-                if known[rid].kind in ("AC", "GOAL", "REQ"):
-                    continue
-                by = [str(x) for x in (it.get("covered_by") or []) if str(x) in ac_rids]
-                rows.append({"rid": rid, "covered_by": sorted(set(by), key=by.index),
-                             "gap": str(it.get("gap") or "")[:300]})
-            covered = sum(1 for x in rows if x["covered_by"])
-            log(f"  покрытие критериями приёмки: {covered} из {len(rows)} требований за {time.time() - started:.0f} с")
-            return rows
+            raw_cov = {}  # покрытие по требованиям от прохода 0: метка прохода → тройки
+            ac_rids = [r.rid for r in reqs if r.kind == "AC"]
+
+            def ac_pass():
+                """Какие требования проверяются критериями приёмки и чего не хватает (параллельно ревьюерам)."""
+                started = time.time()
+                client = clients[reviewers[0]]
+                data = client.chat_json(prompts.AC_SYSTEM, user, max_tokens=24000, role="coverage",
+                                        deadline=float(os.getenv("REQAUDIT_REVIEW_DEADLINE", "0")))
+                known = {r.rid: r for r in reqs}
+                rows = []
+                for it in data.get("ac_coverage") or []:
+                    if not isinstance(it, dict) or str(it.get("rid")) not in known:
+                        continue
+                    rid = str(it["rid"])
+                    if known[rid].kind in ("AC", "GOAL", "REQ"):
+                        continue
+                    by = [str(x) for x in (it.get("covered_by") or []) if str(x) in ac_rids]
+                    rows.append({"rid": rid, "covered_by": sorted(set(by), key=by.index),
+                                 "gap": str(it.get("gap") or "")[:300]})
+                covered = sum(1 for x in rows if x["covered_by"])
+                log(f"  покрытие критериями приёмки: {covered} из {len(rows)} требований за {time.time() - started:.0f} с")
+                return rows
 
 
-        def review(task):
-            client, variant, label = task
-            started = time.time()
-            data = client.chat_json(prompts.reviewer_system(variant), user, max_tokens=64000,
-                                    deadline=float(os.getenv("REQAUDIT_REVIEW_DEADLINE", "0")), role="reviewer")
-            fs = _to_findings(data, label)
-            if variant == 0 and isinstance(data.get("coverage"), list):
-                raw_cov[label] = data["coverage"]
-            log(f"  ревьюер {label}: {len(fs)} находок за {time.time() - started:.0f} с")
-            return fs
+            def review(task):
+                client, variant, label = task
+                started = time.time()
+                data = client.chat_json(prompts.reviewer_system(variant), user, max_tokens=64000,
+                                        deadline=float(os.getenv("REQAUDIT_REVIEW_DEADLINE", "0")), role="reviewer")
+                fs = _to_findings(data, label)
+                if variant == 0 and isinstance(data.get("coverage"), list):
+                    raw_cov[label] = data["coverage"]
+                log(f"  ревьюер {label}: {len(fs)} находок за {time.time() - started:.0f} с")
+                return fs
 
-        with ThreadPoolExecutor(max_workers=max(1, len(tasks)) + 1) as ex:
-            ac_future = ex.submit(ac_pass) if ac_rids else None
-            futures = [(t, ex.submit(review, t)) for t in tasks]
-            for t, fut in futures:
-                try:
-                    for f in fut.result():
-                        if grounder.ground(f):
-                            all_findings.append(f)
+            with ThreadPoolExecutor(max_workers=max(1, len(tasks)) + 1) as ex:
+                ac_future = ex.submit(ac_pass) if ac_rids else None
+                futures = [(t, ex.submit(review, t)) for t in tasks]
+                for t, fut in futures:
+                    try:
+                        for f in fut.result():
+                            if grounder.ground(f):
+                                all_findings.append(f)
+                            else:
+                                result.dropped_ungrounded.append(f)
+                    except BudgetExceeded as e:
+                        _budget_stopped(result, e, f"Ревьюер {t[2]}")
+                    except (LLMError, ValueError) as e:
+                        result.failures.append(f"Ревьюер {t[2]} недоступен: {str(e)[:200]}")
+                        log(f"  ревьюер {t[2]} упал: {str(e)[:160]}")
+                if ac_future is not None:
+                    try:
+                        result.ac_coverage = ac_future.result()
+                        result.steps["ac"] = "ok"
+                    except BudgetExceeded as e:
+                        _budget_stopped(result, e, "Покрытие критериями приёмки")
+                    except (LLMError, ValueError) as e:
+                        result.steps["ac"] = "error"
+                        result.failures.append(f"Покрытие критериями приёмки не построено: {str(e)[:200]}")
+            ok_rev = len(tasks) - sum(1 for x in result.failures if x.startswith("Ревьюер ")) \
+                - sum(1 for x in result.budget_blocked if x.startswith("Ревьюер "))
+            result.steps["reviewers"] = f"{max(ok_rev, 0)}/{len(tasks)}"
+            result.coverage = {"_raw": raw_cov}
+            log(f"проверка цитат: подтверждено {len(all_findings)}, отброшено {len(result.dropped_ungrounded)}")
+        return {"trail": state.get("trail", []) + ["review"]}
+
+    def n_merge(state: dict) -> dict:
+        """Склейка одинаковых находок кодом, временные номера для критика."""
+        nonlocal _label, ac_future, ac_pass, ac_rids, alive, all_findings, anomaly, blocked, by_id, changes, cid, cites_line, client, clients, d_of, data, doc, down, dup, dup_map, e, est, ex, f, fld, foci, focus, focus_env, fut, futures, grounder, i, ids, judge, judge_name, kept, kind_by_rid, kinds, kinds_of, label, llm_votes, merged, n_llm_voters, n_var, name, new_proof, new_sev, notes, numbered, ok_rev, payload, planned, prio_objs, protected, q, raw_cov, reqs, result, review, reviewers, rule_findings, seen_q, stats, t, t0, tasks, tgt, tracker, unpriced, user, v, val, verdict, vote
+        merged = merge_findings(all_findings)
+        merged.sort(key=_sort_key)
+        n_llm_voters = len(result.reviewer_labels)
+        for f in merged:
+            llm_votes = [v for v in f.votes if v != "правила"]
+            if n_llm_voters >= 2 and len(llm_votes) == 1 and "правила" not in f.votes:
+                f.status_note = (f.status_note + " " if f.status_note else "") + f"Найдено одним ревьюером из {n_llm_voters}."
+        log(f"склейка: {len(merged)} уникальных находок")
+
+        # Отдельного оркестратора нет: тексты находок остаются авторскими (от ревьюеров), а дубли, приоритет вопросов
+        # и опровержение делает один вызов-критик (судья).
+        prio_objs = []
+        merged.sort(key=_sort_key)
+        ids = {f"C-{n:02d}": f for n, f in enumerate(merged, start=1)}  # временные номера для критика
+        dup_map = {}
+        return {"trail": state.get("trail", []) + ["merge"]}
+
+    def n_critic(state: dict) -> dict:
+        """Критик пытается опровергнуть каждую находку, склеивает дубли, расставляет приоритет вопросов."""
+        nonlocal _label, ac_future, ac_pass, ac_rids, alive, all_findings, anomaly, blocked, by_id, changes, cid, cites_line, client, clients, d_of, data, doc, down, dup, dup_map, e, est, ex, f, fld, foci, focus, focus_env, fut, futures, grounder, i, ids, judge, judge_name, kept, kind_by_rid, kinds, kinds_of, label, llm_votes, merged, n_llm_voters, n_var, name, new_proof, new_sev, notes, numbered, ok_rev, payload, planned, prio_objs, protected, q, raw_cov, reqs, result, review, reviewers, rule_findings, seen_q, stats, t, t0, tasks, tgt, tracker, unpriced, user, v, val, verdict, vote
+        # ---------------------------------------------------------------- судья
+        if clients and merged and tracker.exhausted:
+            result.failures.append("Судья пропущен: исчерпан бюджет — находки не перепроверены.")
+            result.steps["judge"] = "budget"
+        elif clients and merged:
+            judge = clients[judge_name]
+            if os.getenv("REQAUDIT_JUDGE_EFFORT"):
+                judge.reasoning_effort = os.environ["REQAUDIT_JUDGE_EFFORT"]
+            result.judge = judge.info
+            result.judge_independent = judge.label not in [clients[n].label for n in reviewers]
+            payload = json.dumps([_compact(f, cid) for cid, f in ids.items() if f.proof != "Ш"], ensure_ascii=False)
+            try:
+                log(f"критик: {judge.label}" + ("" if result.judge_independent else " (отдельный вызов той же модели)"))
+                data = judge.chat_json(prompts.JUDGE_SYSTEM, prompts.judge_user(payload, doc.numbered_text()), max_tokens=40000,
+                                       role="judge")
+                by_id = ids
+                kinds_of = {r.rid: r.kind for r in reqs}
+                dup = set()
+                for v in data.get("verdicts") or []:
+                    cid = str(v.get("id") or "")
+                    f = by_id.get(cid)
+                    if not f:
+                        continue
+                    d_of = str(v.get("duplicate_of") or "")
+                    if d_of and d_of in by_id and d_of != cid and d_of not in dup_map:
+                        tgt = by_id[d_of]  # та же проблема: голоса, требования и цитаты переносим в основную находку
+                        for vote in f.votes:
+                            if vote not in tgt.votes:
+                                tgt.votes.append(vote)
+                        tgt.rids = sorted(set(tgt.rids) | set(f.rids))
+                        tgt.origins = list(dict.fromkeys(tgt.origins + f.origins))
+                        seen_q = {(q.line_start, normalize(q.text)) for q in tgt.quotes}
+                        for q in f.quotes:
+                            if (q.line_start, normalize(q.text)) not in seen_q and len(tgt.quotes) < 5:
+                                tgt.quotes.append(q)
+                        if not tgt.question and f.question:
+                            tgt.question = f.question
+                        if not tgt.scenario and f.scenario:
+                            tgt.scenario = f.scenario
+                        dup.add(cid)
+                        dup_map[cid] = d_of
+                        continue
+                    verdict = str(v.get("verdict") or "").lower()
+                    f.judge = verdict if verdict in ("confirmed", "disputed", "rejected") else ""
+                    f.judge_note = str(v.get("note") or "")[:300]
+                    _apply_patch(f, v.get("patch"))
+                    cites_line = any(1 <= int(n) <= len(doc.lines) for n in
+                                     re.findall(r"стр(?:ок\w*|\.)?\s*(\d+)", f.judge_note, flags=re.I))
+                    new_proof = str(v.get("proof") or "")
+                    new_sev = str(v.get("severity") or "")
+                    # Доказанное противоречие в ФТ / критериях приёмки (≥2 несовместимые цитаты) судья может только
+                    # отклонить с обоснованием — понижать тяжесть или доказанность ему не даём.
+                    protected = (f.category == "contradiction" and f.proof == "Д"
+                                 and len({q.line_start for q in f.quotes}) >= 2
+                                 and bool({kinds_of.get(r) for r in f.rids} & {"FR", "AC"}))
+                    changes, blocked = [], []
+                    if new_proof in ("Д", "У", "Ш") and new_proof != f.proof:
+                        if (f.is_rule and f.proof == "Д") or (protected and f.judge != "rejected" and not cites_line):
+                            blocked.append(f"доказанность {f.proof}→{new_proof}")
                         else:
-                            result.dropped_ungrounded.append(f)
-                except BudgetExceeded as e:
-                    _budget_stopped(result, e, f"Ревьюер {t[2]}")
-                except (LLMError, ValueError) as e:
-                    result.failures.append(f"Ревьюер {t[2]} недоступен: {str(e)[:200]}")
-                    log(f"  ревьюер {t[2]} упал: {str(e)[:160]}")
-            if ac_future is not None:
-                try:
-                    result.ac_coverage = ac_future.result()
-                    result.steps["ac"] = "ok"
-                except BudgetExceeded as e:
-                    _budget_stopped(result, e, "Покрытие критериями приёмки")
-                except (LLMError, ValueError) as e:
-                    result.steps["ac"] = "error"
-                    result.failures.append(f"Покрытие критериями приёмки не построено: {str(e)[:200]}")
-        ok_rev = len(tasks) - sum(1 for x in result.failures if x.startswith("Ревьюер ")) \
-            - sum(1 for x in result.budget_blocked if x.startswith("Ревьюер "))
-        result.steps["reviewers"] = f"{max(ok_rev, 0)}/{len(tasks)}"
-        result.coverage = {"_raw": raw_cov}
-        log(f"проверка цитат: подтверждено {len(all_findings)}, отброшено {len(result.dropped_ungrounded)}")
+                            changes.append(f"доказанность {f.proof}→{new_proof}")
+                            f.proof = new_proof
+                    if new_sev in SEVERITY_ORDER and new_sev != f.severity:
+                        down = SEVERITY_ORDER[new_sev] > SEVERITY_ORDER[f.severity]
+                        if protected and down and f.judge != "rejected" and not cites_line:
+                            blocked.append(f"тяжесть {f.severity}→{new_sev}")
+                        else:
+                            changes.append(f"тяжесть {f.severity}→{new_sev}")
+                            f.severity = new_sev
+                    f.judge_change = "; ".join(changes)
+                    if blocked:
+                        f.judge_change = (f.judge_change + "; " if f.judge_change else "") + \
+                            "не принято без ссылки на строку (доказанное противоречие): " + ", ".join(blocked)
+                merged = [f for cid, f in ids.items() if cid not in dup]
+                prio_objs = [ids[str(x)] for x in (data.get("priority") or []) if str(x) in ids and str(x) not in dup]
+                if dup:
+                    log(f"  критик склеил дублей: {len(dup)}")
+                kept = []
+                for f in merged:
+                    # судья может отклонить любую находку, в том числе от правил: на незнакомом документе правило
+                    # может сработать ложно; отклонённые остаются в трассировке (report.json)
+                    (result.rejected if f.judge == "rejected" else kept).append(f)
+                merged = kept
+                result.steps["judge"] = "ok"
+            except BudgetExceeded as e:
+                _budget_stopped(result, e, "Судья")
+            except (LLMError, ValueError) as e:
+                result.steps["judge"] = "error"
+                result.failures.append(f"Судья недоступен: {str(e)[:200]} — находки не перепроверены.")
+                log(f"  судья упал: {str(e)[:160]}")
+        return {"trail": state.get("trail", []) + ["critic"]}
 
-    merged = merge_findings(all_findings)
-    merged.sort(key=_sort_key)
-    n_llm_voters = len(result.reviewer_labels)
-    for f in merged:
-        llm_votes = [v for v in f.votes if v != "правила"]
-        if n_llm_voters >= 2 and len(llm_votes) == 1 and "правила" not in f.votes:
-            f.status_note = (f.status_note + " " if f.status_note else "") + f"Найдено одним ревьюером из {n_llm_voters}."
-    log(f"склейка: {len(merged)} уникальных находок")
+    def n_finalize(state: dict) -> dict:
+        """Детерминированная калибровка тяжести, итоговые номера, покрытие, учёт расходов."""
+        nonlocal _label, ac_future, ac_pass, ac_rids, alive, all_findings, anomaly, blocked, by_id, changes, cid, cites_line, client, clients, d_of, data, doc, down, dup, dup_map, e, est, ex, f, fld, foci, focus, focus_env, fut, futures, grounder, i, ids, judge, judge_name, kept, kind_by_rid, kinds, kinds_of, label, llm_votes, merged, n_llm_voters, n_var, name, new_proof, new_sev, notes, numbered, ok_rev, payload, planned, prio_objs, protected, q, raw_cov, reqs, result, review, reviewers, rule_findings, seen_q, stats, t, t0, tasks, tgt, tracker, unpriced, user, v, val, verdict, vote
+        # Детерминированная калибровка тяжести: подтверждённое противоречие в ключевой логике (ФТ / критерии приёмки)
+        # по определению блокирует разработку — не даём модели «плавать» между прогонами.
+        kind_by_rid = {r.rid: r.kind for r in reqs}
+        for f in merged:
+            kinds = {kind_by_rid.get(r) for r in f.rids}
+            # «противоречие» и «некорректность» с двумя несовместимыми цитатами — по сути одно и то же
+            if (f.category in ("contradiction", "incorrect") and f.proof == "Д"
+                    and (not f.judge or (f.judge == "confirmed" and "тяжесть" not in (f.judge_change or "")))
+                    and len({q.line_start for q in f.quotes}) >= 2
+                    and (kinds & {"FR", "API", "INT", "REQ"}) and f.severity != "blocker"):
+                f.severity = "blocker"
+                f.status_note = (f.status_note + " " if f.status_note else "") + \
+                    "Тяжесть повышена до блокера правилом: доказанное противоречие в функциональных требованиях или контракте API."
 
-    # Отдельного оркестратора нет: тексты находок остаются авторскими (от ревьюеров), а дубли, приоритет вопросов
-    # и опровержение делает один вызов-критик (судья).
-    prio_objs: list[Finding] = []
-    merged.sort(key=_sort_key)
-    ids: dict[str, Finding] = {f"C-{n:02d}": f for n, f in enumerate(merged, start=1)}  # временные номера для критика
-    dup_map: dict[str, str] = {}
+        merged.sort(key=_sort_key)
+        for i, f in enumerate(merged, start=1):
+            f.fid = f"F-{i:02d}"
+        result.findings = merged
+        alive = {id(f) for f in merged}
+        result.priority = [f.fid for f in prio_objs if id(f) in alive]
+        result.coverage = build_coverage(reqs, merged, result)
+        for f in merged:  # временные номера C-xx в текстах → итоговые F-xx
+            for fld in ("explanation", "scenario", "impact", "suggestion", "status_note", "judge_note"):
+                val = getattr(f, fld, "")
+                if isinstance(val, str) and "C-" in val:
+                    setattr(f, fld, _remap_prose(val, alive, ids, dup_map))
+        stats.seconds = time.time() - t0
+        result.finished_at = datetime.now().strftime("%d.%m.%Y %H:%M")
+        if tracker is not None:
+            anomaly = tracker.anomaly()
+            if anomaly:
+                result.failures.append(anomaly)
+            finalize_costs(result, tracker)
+            log(f"стоимость прогона: {costs.passport_line(result.costs)}")
+        log(f"готово: {len(merged)} находок, вызовов LLM: {stats.llm_calls} (кэш: {stats.llm_cached}), {stats.seconds:.0f} с")
+        return {"trail": state.get("trail", []) + ["finalize"]}
 
-    # ---------------------------------------------------------------- судья
-    if clients and merged and tracker.exhausted:
-        result.failures.append("Судья пропущен: исчерпан бюджет — находки не перепроверены.")
-        result.steps["judge"] = "budget"
-    elif clients and merged:
-        judge = clients[judge_name]
-        if os.getenv("REQAUDIT_JUDGE_EFFORT"):
-            judge.reasoning_effort = os.environ["REQAUDIT_JUDGE_EFFORT"]
-        result.judge = judge.info
-        result.judge_independent = judge.label not in [clients[n].label for n in reviewers]
-        payload = json.dumps([_compact(f, cid) for cid, f in ids.items() if f.proof != "Ш"], ensure_ascii=False)
-        try:
-            log(f"критик: {judge.label}" + ("" if result.judge_independent else " (отдельный вызов той же модели)"))
-            data = judge.chat_json(prompts.JUDGE_SYSTEM, prompts.judge_user(payload, doc.numbered_text()), max_tokens=40000,
-                                   role="judge")
-            by_id = ids
-            kinds_of = {r.rid: r.kind for r in reqs}
-            dup: set[str] = set()
-            for v in data.get("verdicts") or []:
-                cid = str(v.get("id") or "")
-                f = by_id.get(cid)
-                if not f:
-                    continue
-                d_of = str(v.get("duplicate_of") or "")
-                if d_of and d_of in by_id and d_of != cid and d_of not in dup_map:
-                    tgt = by_id[d_of]  # та же проблема: голоса, требования и цитаты переносим в основную находку
-                    for vote in f.votes:
-                        if vote not in tgt.votes:
-                            tgt.votes.append(vote)
-                    tgt.rids = sorted(set(tgt.rids) | set(f.rids))
-                    tgt.origins = list(dict.fromkeys(tgt.origins + f.origins))
-                    seen_q = {(q.line_start, normalize(q.text)) for q in tgt.quotes}
-                    for q in f.quotes:
-                        if (q.line_start, normalize(q.text)) not in seen_q and len(tgt.quotes) < 5:
-                            tgt.quotes.append(q)
-                    if not tgt.question and f.question:
-                        tgt.question = f.question
-                    if not tgt.scenario and f.scenario:
-                        tgt.scenario = f.scenario
-                    dup.add(cid)
-                    dup_map[cid] = d_of
-                    continue
-                verdict = str(v.get("verdict") or "").lower()
-                f.judge = verdict if verdict in ("confirmed", "disputed", "rejected") else ""
-                f.judge_note = str(v.get("note") or "")[:300]
-                _apply_patch(f, v.get("patch"))
-                cites_line = any(1 <= int(n) <= len(doc.lines) for n in
-                                 re.findall(r"стр(?:ок\w*|\.)?\s*(\d+)", f.judge_note, flags=re.I))
-                new_proof = str(v.get("proof") or "")
-                new_sev = str(v.get("severity") or "")
-                # Доказанное противоречие в ФТ / критериях приёмки (≥2 несовместимые цитаты) судья может только
-                # отклонить с обоснованием — понижать тяжесть или доказанность ему не даём.
-                protected = (f.category == "contradiction" and f.proof == "Д"
-                             and len({q.line_start for q in f.quotes}) >= 2
-                             and bool({kinds_of.get(r) for r in f.rids} & {"FR", "AC"}))
-                changes, blocked = [], []
-                if new_proof in ("Д", "У", "Ш") and new_proof != f.proof:
-                    if (f.is_rule and f.proof == "Д") or (protected and f.judge != "rejected" and not cites_line):
-                        blocked.append(f"доказанность {f.proof}→{new_proof}")
-                    else:
-                        changes.append(f"доказанность {f.proof}→{new_proof}")
-                        f.proof = new_proof
-                if new_sev in SEVERITY_ORDER and new_sev != f.severity:
-                    down = SEVERITY_ORDER[new_sev] > SEVERITY_ORDER[f.severity]
-                    if protected and down and f.judge != "rejected" and not cites_line:
-                        blocked.append(f"тяжесть {f.severity}→{new_sev}")
-                    else:
-                        changes.append(f"тяжесть {f.severity}→{new_sev}")
-                        f.severity = new_sev
-                f.judge_change = "; ".join(changes)
-                if blocked:
-                    f.judge_change = (f.judge_change + "; " if f.judge_change else "") + \
-                        "не принято без ссылки на строку (доказанное противоречие): " + ", ".join(blocked)
-            merged = [f for cid, f in ids.items() if cid not in dup]
-            prio_objs = [ids[str(x)] for x in (data.get("priority") or []) if str(x) in ids and str(x) not in dup]
-            if dup:
-                log(f"  критик склеил дублей: {len(dup)}")
-            kept = []
-            for f in merged:
-                # судья может отклонить любую находку, в том числе от правил: на незнакомом документе правило
-                # может сработать ложно; отклонённые остаются в трассировке (report.json)
-                (result.rejected if f.judge == "rejected" else kept).append(f)
-            merged = kept
-            result.steps["judge"] = "ok"
-        except BudgetExceeded as e:
-            _budget_stopped(result, e, "Судья")
-        except (LLMError, ValueError) as e:
-            result.steps["judge"] = "error"
-            result.failures.append(f"Судья недоступен: {str(e)[:200]} — находки не перепроверены.")
-            log(f"  судья упал: {str(e)[:160]}")
-
-    # Детерминированная калибровка тяжести: подтверждённое противоречие в ключевой логике (ФТ / критерии приёмки)
-    # по определению блокирует разработку — не даём модели «плавать» между прогонами.
-    kind_by_rid = {r.rid: r.kind for r in reqs}
-    for f in merged:
-        kinds = {kind_by_rid.get(r) for r in f.rids}
-        # «противоречие» и «некорректность» с двумя несовместимыми цитатами — по сути одно и то же
-        if (f.category in ("contradiction", "incorrect") and f.proof == "Д"
-                and (not f.judge or (f.judge == "confirmed" and "тяжесть" not in (f.judge_change or "")))
-                and len({q.line_start for q in f.quotes}) >= 2
-                and (kinds & {"FR", "API", "INT", "REQ"}) and f.severity != "blocker"):
-            f.severity = "blocker"
-            f.status_note = (f.status_note + " " if f.status_note else "") + \
-                "Тяжесть повышена до блокера правилом: доказанное противоречие в функциональных требованиях или контракте API."
-
-    merged.sort(key=_sort_key)
-    for i, f in enumerate(merged, start=1):
-        f.fid = f"F-{i:02d}"
-    result.findings = merged
-    alive = {id(f) for f in merged}
-    result.priority = [f.fid for f in prio_objs if id(f) in alive]
-    result.coverage = build_coverage(reqs, merged, result)
-    for f in merged:  # временные номера C-xx в текстах → итоговые F-xx
-        for fld in ("explanation", "scenario", "impact", "suggestion", "status_note", "judge_note"):
-            val = getattr(f, fld, "")
-            if isinstance(val, str) and "C-" in val:
-                setattr(f, fld, _remap_prose(val, alive, ids, dup_map))
-    stats.seconds = time.time() - t0
-    result.finished_at = datetime.now().strftime("%d.%m.%Y %H:%M")
-    if tracker is not None:
-        anomaly = tracker.anomaly()
-        if anomaly:
-            result.failures.append(anomaly)
-        finalize_costs(result, tracker)
-        log(f"стоимость прогона: {costs.passport_line(result.costs)}")
-    log(f"готово: {len(merged)} находок, вызовов LLM: {stats.llm_calls} (кэш: {stats.llm_cached}), {stats.seconds:.0f} с")
+    graph = StateGraph(dict)
+    for name, fn in (("ingest", n_ingest), ("review", n_review), ("merge", n_merge), ("critic", n_critic),
+                     ("finalize", n_finalize)):
+        graph.add_node(name, fn)
+    graph.add_edge(START, "ingest")
+    graph.add_edge("ingest", "review")
+    graph.add_edge("review", "merge")
+    graph.add_conditional_edges("merge", lambda s: "critic" if clients and merged else "finalize",
+                                {"critic": "critic", "finalize": "finalize"})
+    graph.add_edge("critic", "finalize")
+    graph.add_edge("finalize", END)
+    state = graph.compile().invoke({"trail": []})
+    result.steps["graph"] = " → ".join(state.get("trail", []))
     return result
 
 
