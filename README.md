@@ -40,7 +40,8 @@ python -m reqaudit docs/requirements.pdf report.md
 [`submission/report.pdf`](submission/report.pdf) — запускать для просмотра не нужно.
 
 **Модели:** все шаги с LLM (пять запусков ревьюеров, покрытие приёмкой, критик) — **Claude Opus 5.5**
-(`claude-opus-5-5`, effort `high`) через Anthropic API; остальное — детерминированный код.
+(`claude-opus-5-5`, effort `high` по умолчанию; отчёт в `submission/` сделан с effort `medium`) через Anthropic API;
+остальное — детерминированный код.
 
 ## Архитектура
 
