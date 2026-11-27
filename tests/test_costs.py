@@ -69,7 +69,7 @@ class FakeSDK:
 
 
 ENV_KEYS = [PROVIDERS[n][1] for n in PROVIDERS if PROVIDERS[n][1]] + [
-    "REQAUDIT_REVIEWERS", "REQAUDIT_JUDGE", "REQAUDIT_ORCHESTRATOR",
+    "REQAUDIT_REVIEWERS", "REQAUDIT_JUDGE",
     "REQAUDIT_JUDGE_MODEL", "REQAUDIT_ORCH_MODEL", "REQAUDIT_VARIANTS", "ANTHROPIC_FOCUS", "ANTHROPIC_EFFORT", "ANTHROPIC_MODEL",
     "REQAUDIT_ORCH_EFFORT", "REQAUDIT_JUDGE_EFFORT", "REQAUDIT_PRICES_FILE", "ANTHROPIC_FALLBACK",
     "ANTHROPIC_BASE_URL"]
@@ -436,7 +436,7 @@ class PipelineCostsTest(CostsBase):
         self.spec.write_text(SPEC, encoding="utf-8")
         self.sdk = FakeSDK(text=_answer)
         os.environ.update({"ANTHROPIC_API_KEY": "test-key", "REQAUDIT_REVIEWERS": "anthropic",
-                           "REQAUDIT_ORCHESTRATOR": "anthropic", "REQAUDIT_JUDGE": "anthropic",
+                           "REQAUDIT_JUDGE": "anthropic",
                            "REQAUDIT_JUDGE_MODEL": "claude-sonnet-5-5", "ANTHROPIC_FOCUS": "0,2,3"})
         self.patch = mock.patch("anthropic.Anthropic", return_value=self.sdk)
         self.patch.start()
@@ -770,7 +770,7 @@ class RoleModelTest(unittest.TestCase):
 
         stats = RunStats()
         gem = LLMClient("gemini", "Google", "gemini-flash-latest", "https://x/v1", "k", stats, None)
-        env = {"REQAUDIT_REVIEWERS": "anthropic", "REQAUDIT_ORCHESTRATOR": "anthropic", "REQAUDIT_JUDGE": "anthropic",
+        env = {"REQAUDIT_REVIEWERS": "anthropic", "REQAUDIT_JUDGE": "anthropic",
                "REQAUDIT_JUDGE_MODEL": "claude-sonnet-5-5"}
         with mock.patch.dict(os.environ, env):
             clients = {"gemini": gem}

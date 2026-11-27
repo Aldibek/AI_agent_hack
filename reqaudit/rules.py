@@ -215,7 +215,7 @@ def rule_http(doc: Document, reqs: list[Requirement]) -> list[Finding]:
                 mutating.append(r)
         if mutating:
             quotes = [_q(doc, method_req.line_start)] + [_q(doc, r.line_start) for r in mutating[:2]]
-            out.append(_f("http_get_mutation", "incorrect", "major", "Д", "Метод GET используется для изменения состояния",
+            out.append(_f("http_get_mutation", "incorrect", "blocker", "Д", "Метод GET используется для изменения состояния",
                           "Метод заявлен как GET, а по описанию он сохраняет/заменяет данные. GET по RFC 9110 §9.2.1 — "
                           "«безопасный» метод только для чтения: его кэшируют прокси, повторяют клиенты и браузеры, "
                           "параметры (идентификатор карты, сумма) попадают в URL, логи и историю.",

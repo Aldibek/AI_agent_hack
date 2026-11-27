@@ -274,14 +274,17 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
         result.mode = "rules-only"
     else:
         reviewers, judge_name = pick_roles(clients)
-        variants = int(os.getenv("REQAUDIT_VARIANTS", "2" if len(reviewers) == 1 else "1"))
         tasks = []
         for i, name in enumerate(reviewers):
             focus_env = os.getenv(f"{name.upper()}_FOCUS", "").strip()
+            n_var = os.getenv(f"{name.upper()}_VARIANTS") or os.getenv("REQAUDIT_VARIANTS")
             if focus_env:
-                foci = [int(x) % 4 for x in focus_env.split(",") if x.strip().isdigit()]
+                foci = [int(x) for x in focus_env.split(",") if x.strip().isdigit() and int(x) in prompts.FOCUS]
+            elif n_var:
+                foci = [prompts.PASSES[(i + v) % len(prompts.PASSES)] for v in range(int(n_var))]
             else:
-                foci = [(i + v) % 3 for v in range(int(os.getenv(f"{name.upper()}_VARIANTS", variants)))]
+                # по умолчанию три прохода (каждое требование / 5 ролей / два разработчика) делятся между ревьюерами
+                foci = [f for k, f in enumerate(prompts.PASSES) if k % len(reviewers) == i]
             for v, focus in enumerate(foci):
                 label = name if len(foci) == 1 else f"{name}#{v + 1}"
                 tasks.append((clients[name], focus, label))
@@ -490,11 +493,11 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
         # «противоречие» и «некорректность» с двумя несовместимыми цитатами — по сути одно и то же
         if (f.category in ("contradiction", "incorrect") and f.proof == "Д"
                 and (not f.judge or (f.judge == "confirmed" and "тяжесть" not in (f.judge_change or "")))
-                and kinds & {"FR", "AC"} and len({q.line_start for q in f.quotes}) >= 2
-                and (kinds & {"FR"}) and f.severity != "blocker"):
+                and len({q.line_start for q in f.quotes}) >= 2
+                and (kinds & {"FR", "API", "INT"}) and f.severity != "blocker"):
             f.severity = "blocker"
             f.status_note = (f.status_note + " " if f.status_note else "") + \
-                "Тяжесть повышена до блокера правилом: доказанное противоречие в функциональных требованиях."
+                "Тяжесть повышена до блокера правилом: доказанное противоречие в функциональных требованиях или контракте API."
 
     merged.sort(key=_sort_key)
     for i, f in enumerate(merged, start=1):
