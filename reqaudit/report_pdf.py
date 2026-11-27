@@ -67,7 +67,7 @@ def build_html(result: RunResult) -> str:
     for f in findings:
         for rid in f.rids:
             per_req[rid].append(f)
-    title = next((ln.text.lstrip("# ").strip() for ln in doc.lines if ln.text.startswith("# ")), doc.name)
+    title = doc.title()
     when = result.finished_at or datetime.now().strftime("%d.%m.%Y %H:%M")
     dev, test = v["dev"][0], v["test"][0]
     verdict = {"Нельзя": "Разработку начинать <span class='red'>нельзя</span>.",

@@ -156,7 +156,7 @@ def render_html(result: RunResult, out_path: Path) -> None:
     n_ok = sum(1 for r in reqs if cov.get(r.rid, {}).get("status") == "ok")
     n_def = sum(1 for r in reqs if cov.get(r.rid, {}).get("status") == "defect")
     n_un = len(reqs) - n_ok - n_def
-    title = next((ln.text.lstrip("# ").strip() for ln in doc.lines if ln.text.startswith("# ")), doc.name)
+    title = doc.title()
     md_path = out_path.with_suffix(".md")
     md_text = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
     pdf_path = out_path.with_suffix(".pdf")

@@ -151,7 +151,7 @@ def render(result: RunResult, out_path: Path) -> str:
 
     # 1. паспорт
     L += ["## 1. Паспорт прогона", "", "| Параметр | Значение |", "| :--- | :--- |"]
-    title = next((ln.text.lstrip("# ").strip() for ln in doc.lines if ln.text.startswith("# ")), doc.name)
+    title = doc.title()
     L.append(f"| Документ | {_esc(title)} (файл `{doc.name}`) |")
     L.append(f"| Формат / объём | {doc.fmt.upper()}, строк: {len(doc.lines)}" + (f", страниц: {doc.pages}" if doc.pages else "") + " |")
     L.append(f"| SHA-256 файла | `{doc.sha256[:16]}…` |")

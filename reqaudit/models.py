@@ -33,6 +33,25 @@ class Document(BaseModel):
             out.append(f"{str(ln.n).rjust(width)}| {ln.text}")
         return "\n".join(out)
 
+    def title(self) -> str:
+        """Название документа: первый заголовок, если это не номер раздела; иначе строка «Техническая спецификация…»
+        в начале документа; иначе имя файла."""
+        import re
+
+        def clean(t: str) -> str:
+            t = re.sub(r"<!--.*?(?:-->|$)|<[^>]+>", " ", t)
+            return re.sub(r"[*_`#|]+", " ", t).strip(" .:").split("  ")[0].strip()[:160]
+
+        h1 = next((clean(ln.text) for ln in self.lines if ln.text.startswith("# ")), "")
+        if h1 and not re.match(r"^\d+[.)]?\s|^(общие положения|введение|содержание)\b", h1, re.I):
+            return h1
+        for ln in self.lines[:60]:
+            t = clean(ln.text)
+            if 10 <= len(t) <= 160 and re.search(r"техническ\w* (?:задани|спецификац)|техникалық|спецификаци\w* "
+                                                  r"(?:требован|на)|requirements spec", t, re.I):
+                return t
+        return h1 or self.name
+
     def where(self, start: int, end: int | None = None) -> str:
         end = end or start
         rng = f"строка {start}" if start == end else f"строки {start}–{end}"
