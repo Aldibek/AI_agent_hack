@@ -487,12 +487,13 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
     kind_by_rid = {r.rid: r.kind for r in reqs}
     for f in merged:
         kinds = {kind_by_rid.get(r) for r in f.rids}
-        if (f.category == "contradiction" and f.proof == "Д" and not f.judge
+        if (f.category == "contradiction" and f.proof == "Д"
+                and (not f.judge or (f.judge == "confirmed" and "тяжесть" not in (f.judge_change or "")))
                 and kinds & {"FR", "AC"} and len({q.line_start for q in f.quotes}) >= 2
                 and (kinds & {"FR"}) and f.severity != "blocker"):
             f.severity = "blocker"
             f.status_note = (f.status_note + " " if f.status_note else "") + \
-                "Тяжесть повышена до блокера правилом: противоречие в функциональных требованиях, критик его не проверял."
+                "Тяжесть повышена до блокера правилом: доказанное противоречие в функциональных требованиях."
 
     merged.sort(key=_sort_key)
     for i, f in enumerate(merged, start=1):
