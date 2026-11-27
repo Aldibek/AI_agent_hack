@@ -320,7 +320,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
             started = time.time()
             client = clients[reviewers[0]]
             data = client.chat_json(prompts.AC_SYSTEM, user, max_tokens=24000, role="coverage",
-                                    deadline=float(os.getenv("REQAUDIT_REVIEW_DEADLINE", "480")))
+                                    deadline=float(os.getenv("REQAUDIT_REVIEW_DEADLINE", "0")))
             known = {r.rid: r for r in reqs}
             rows = []
             for it in data.get("ac_coverage") or []:
@@ -341,7 +341,7 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
             client, variant, label = task
             started = time.time()
             data = client.chat_json(prompts.reviewer_system(variant), user, max_tokens=64000,
-                                    deadline=float(os.getenv("REQAUDIT_REVIEW_DEADLINE", "480")), role="reviewer")
+                                    deadline=float(os.getenv("REQAUDIT_REVIEW_DEADLINE", "0")), role="reviewer")
             fs = _to_findings(data, label)
             if variant == 0 and isinstance(data.get("coverage"), list):
                 raw_cov[label] = data["coverage"]

@@ -101,7 +101,7 @@ class LLMClient:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        deadline_at = time.time() + (deadline or float(os.getenv("REQAUDIT_CALL_DEADLINE", "900")))
+        deadline_at = _deadline_at(deadline)
         delays = [3, 8, 20, 45]
         last_err = ""
         for attempt in range(len(delays) + 1):
@@ -256,6 +256,12 @@ def _salvage(client, role: str, content: str, limit: int) -> dict | None:
     _event(client, f"{client.label} ({role}): ответ обрезан по max_tokens={limit} — использована дописанная часть")
     data["_truncated"] = True
     return data
+
+
+def _deadline_at(deadline: float | None) -> float:
+    """Ограничение времени вызова выключено по умолчанию (0 — без лимита); включается REQAUDIT_CALL_DEADLINE."""
+    d = deadline or float(os.getenv("REQAUDIT_CALL_DEADLINE", "0") or 0)
+    return time.time() + d if d > 0 else float("inf")
 
 
 def repair_json(text: str) -> dict | None:
@@ -454,7 +460,7 @@ class AnthropicClient:
                 self.tracker.record(provider=self.name, model=self.model, role=role, cached=True)
             return json.loads(cache.read_text(encoding="utf-8"))["content"]
         reserved = self.tracker.check(self.model, role, _chars(messages)) if self.tracker else 0.0
-        deadline_at = time.time() + (deadline or float(os.getenv("REQAUDIT_CALL_DEADLINE", "900")))
+        deadline_at = _deadline_at(deadline)
         started = time.time()
         with self._lock:
             self.stats.llm_calls += 1
