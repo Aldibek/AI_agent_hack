@@ -53,8 +53,11 @@ def matches(item: dict, f: dict) -> bool:
             ok = want <= lines if item.get("mode") == "all" else bool(want & lines)
         if not ok:
             return False
+    kt = item.get("kw_title")
+    if kt and not re.search(kt, str(f.get("title", "")).lower()):
+        return False
     kw = item.get("kw")
-    return bool(re.search(kw, text)) if kw else bool(want)
+    return bool(re.search(kw, text)) if kw else bool(want or kt)
 
 
 def main(report_path: str, gold_path: str) -> None:
