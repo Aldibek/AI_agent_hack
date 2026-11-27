@@ -306,6 +306,7 @@ SCEN_RE = re.compile(r"^\s*(?:Сценарий:\s*)?(?P<case>.*?)\s*Разраб
 def _md(text: str) -> str:
     """Текст модели/документа → безопасный для Markdown (без случайной разметки)."""
     t = (text or "").replace("**", "").replace("`", "'")
+    t = t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")  # текст документа не должен стать HTML
     return re.sub(r"([\\*_#>|\[\]$])", r"\\\1", t)
 
 

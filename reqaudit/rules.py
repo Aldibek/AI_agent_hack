@@ -248,6 +248,10 @@ def rule_status_codes(doc: Document, reqs: list[Requirement]) -> list[Finding]:
             m = desc_re.match(sent)
             if m:
                 described.setdefault(int(m.group(1)), ln.n)
+        # таблица кодов: «| 400 | когда | тело |» — код описан, если в строке есть хоть одна непустая ячейка кроме кода
+        tm = re.match(r"^\s*\|\s*`?([1-5]\d\d)`?\s*\|(.*)$", ln.text)
+        if tm and re.search(r"\w", tm.group(2)):
+            described.setdefault(int(tm.group(1)), ln.n)
         hm = head_re.match(s)
         if hm:
             code, reason = int(hm.group(1)), hm.group(2).strip().lower()
@@ -298,6 +302,9 @@ def rule_units(doc: Document, reqs: list[Requirement]) -> list[Finding]:
     for minor_re, major_re, a, b in pairs:
         minor_lines = [r for r in reqs if re.search(minor_re, r.text, re.I)]
         major_lines = [r for r in reqs if re.search(major_re, r.text, re.I) and r.kind in {"DATA", "API", "FR"}]
+        conv = re.compile(rf"(?:×|\*|x)\s*100\b|\b100\s*{minor_re}|сравнени\w*[^.]*\bв\s+{minor_re}", re.I)
+        if any(conv.search(ln.text) for ln in doc.lines):
+            continue  # правило приведения в документе есть
         if minor_lines and major_lines:
             q = [_q(doc, minor_lines[0].line_start)]
             other = next((r for r in major_lines if r.line_start != minor_lines[0].line_start), None)
@@ -547,7 +554,7 @@ def rule_card_data(doc: Document, reqs: list[Requirement]) -> list[Finding]:
     if not hits:
         return []
     text = " ".join(ln.text for ln in doc.lines)
-    if re.search(r"маскир|PCI|токениз|персональн\w* данн|шифр", text, re.I):
+    if re.search(r"маскир|PCI|токениз|токен\w* карт|card_?token|персональн\w* данн|шифр", text, re.I):
         return []
     return [_f("card_data", "security", "major", "У", "Не определены требования к защите карточных данных",
                "Документ передаёт и хранит идентификаторы и цифры карты, но не определяет, что это за идентификатор "

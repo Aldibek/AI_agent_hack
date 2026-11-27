@@ -349,13 +349,8 @@ def render(result: RunResult, out_path: Path) -> str:
     cats = Counter(category_ru(f.category) for f in findings)
     L.append("- По типам: " + ", ".join(f"{k} — {n}" for k, n in cats.most_common()) + ".")
     L += ["", "**Критичные дефекты:**", ""]
-    any_crit = False
     for group, fs in v["critical"].items():
-        if fs:
-            any_crit = True
-            L.append(f"- **{group}:** " + "; ".join(f"{f.fid} ({_lines_str(f)}) — {f.title}" for f in fs))
-    if not any_crit:
-        L.append("- не выявлено")
+        L.append(f"- **{group}:** " + ("; ".join(f"{f.fid} ({_lines_str(f)}) — {f.title}" for f in fs) if fs else "не выявлено"))
     L.append("")
     # итог
     L += ["## 7. Итог", ""]

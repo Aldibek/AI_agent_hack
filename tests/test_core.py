@@ -169,3 +169,15 @@ class GroundingTest(unittest.TestCase):
                     quotes=[Quote(text="Месяц определяется по дате совершения покупок в Алматы", line=38)])
         self.assertTrue(self.g.ground(f))
         self.assertIn("совершения покупки", f.quotes[0].text)
+
+
+class RulesNotOverfitTest(unittest.TestCase):
+    """Правила не должны ругаться на исправленную версию ТЗ, где дефекты закрыты (таблица кодов, токен карты, ×100)."""
+
+    def test_fixed_spec_has_almost_no_rule_findings(self):
+        root = Path(__file__).resolve().parent.parent
+        doc = load_document(root / "eval" / "samples" / "requirements_fixed.md")
+        ids = sorted({f.source for f in run_rules(doc, segment(doc))[0]})
+        for bad in ("rule:status_undescribed", "rule:card_data", "rule:units"):
+            self.assertNotIn(bad, ids)
+        self.assertLessEqual(len(ids), 2, ids)
