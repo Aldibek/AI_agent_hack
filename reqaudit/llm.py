@@ -225,6 +225,9 @@ def _chat_json(client, system: str, user: str, temperature: float, max_tokens: i
     if meta.get("truncated"):
         used = int(meta.get("max_tokens") or max_tokens or ANTHROPIC_MAX_TOKENS)
         if used >= ANTHROPIC_MAX_TOKENS:
+            salvaged = _salvage(client, role, content, used)
+            if salvaged is not None:
+                return salvaged
             raise LLMError(f"{client.label} ({role}): ответ обрезан по max_tokens={used}, JSON неполный")
         bigger = min(used * 2, ANTHROPIC_MAX_TOKENS)
         meta = {}
@@ -234,11 +237,25 @@ def _chat_json(client, system: str, user: str, temperature: float, max_tokens: i
             return parse_json(content)
         except ValueError as e:
             why = f"обрезан по max_tokens={bigger}" if meta.get("truncated") else "невалидный JSON"
+            salvaged = _salvage(client, role, content, bigger)
+            if salvaged is not None:
+                return salvaged
             raise LLMError(f"{client.label} ({role}): после повтора с max_tokens={bigger} ответ {why}") from e
     messages += [{"role": "assistant", "content": content[:4000]},
                  {"role": "user", "content": "Ответ не является валидным JSON. Верни тот же ответ строго одним JSON-объектом, без пояснений и markdown."}]
     content = client.chat(messages, temperature=0.0, max_tokens=max_tokens, role=role)
     return parse_json(content)
+
+
+def _salvage(client, role: str, content: str, limit: int) -> dict | None:
+    """Обрезанный ответ: оставляем то, что модель успела дописать (законченные находки), вместо потери всего прохода.
+    Недописанный последний объект отбрасывает обычная проверка находок (нет цитат — нет находки)."""
+    data = repair_json(content)
+    if not data or not any(isinstance(v, list) and v for v in data.values()):
+        return None  # спасать нечего — честная ошибка лучше пустого «проверено»
+    _event(client, f"{client.label} ({role}): ответ обрезан по max_tokens={limit} — использована дописанная часть")
+    data["_truncated"] = True
+    return data
 
 
 def repair_json(text: str) -> dict | None:

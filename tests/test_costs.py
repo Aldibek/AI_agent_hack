@@ -379,6 +379,13 @@ class AnthropicRequestTest(CostsBase):
             self.client(sdk).chat_json("S", "U", max_tokens=40000)
         self.assertEqual([r["max_tokens"] for r in sdk.requests], [40000, 64000])
 
+    def test_truncated_at_max_limit_keeps_finished_findings(self):
+        sdk = FakeSDK(text='{"findings": [{"title": "A", "quotes": []}, {"title": "B", "expl', stop_reason="max_tokens")
+        data = self.client(sdk).chat_json("S", "U", max_tokens=64000)
+        self.assertEqual(data["findings"][0]["title"], "A")
+        self.assertTrue(data["_truncated"])
+        self.assertEqual(len(sdk.requests), 1)
+
     def test_invalid_json_without_truncation_asks_again(self):
         answers = iter(["не JSON", '{"ok": 1}'])
         sdk = FakeSDK(text=lambda kw: next(answers))

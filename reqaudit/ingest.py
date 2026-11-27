@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 from pathlib import Path
 
 from .models import Document, Line
@@ -76,7 +77,10 @@ def _load_pdf(path: Path) -> tuple[list[Line], int, list[str]]:
         pages.extend([int(page_no)] * len(page_lines))
     n_pages = len(chunks)
     total_chars = sum(len(t.strip()) for t in texts)
-    if n_pages and total_chars < 80 * n_pages:
+    if n_pages and total_chars < 80 * n_pages and not shutil.which("tesseract"):
+        warnings.append("PDF похож на скан, а Tesseract OCR не установлен (brew install tesseract tesseract-lang / "
+                        "apt install tesseract-ocr tesseract-ocr-rus tesseract-ocr-kaz) — текст сканов не распознан.")
+    elif n_pages and total_chars < 80 * n_pages:
         warnings.append(
             "В PDF почти нет текстового слоя (похоже на скан). Текст извлечён не полностью; "
             "для сканов нужен OCR — результаты проверки неполные."
