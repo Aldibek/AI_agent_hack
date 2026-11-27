@@ -136,3 +136,36 @@ class CoreTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GroundingTest(unittest.TestCase):
+    """Цитаты: короткие — только рядом с подсказкой; нечёткие — только без подмены смысла, текст берётся из документа."""
+
+    @classmethod
+    def setUpClass(cls):
+        root = Path(__file__).resolve().parent.parent
+        cls.doc = load_document(root / "docs" / "requirements.md")
+        cls.g = Grounder(cls.doc, segment(cls.doc))
+
+    def test_short_quote_near_hint(self):
+        self.assertEqual(self.g.find("GET", 104)[:3], (104, 104, "exact"))
+        self.assertEqual(self.g.find("404", 190)[0], 189)
+
+    def test_short_quote_far_from_hint_or_without_hint(self):
+        self.assertIsNone(self.g.find("GET", 10))
+        self.assertIsNone(self.g.find("GET", None))
+
+    def test_fuzzy_rejects_changed_meaning(self):
+        self.assertIsNone(self.g.find("Месяц определяется по дате проведения покупки в Алматы", 38))
+        self.assertIsNone(self.g.find("На карту приходится максимум два таких push за календарный месяц", 39))
+
+    def test_fuzzy_accepts_typo_and_uses_document_text(self):
+        hit = self.g.find("Месяц определяется по дате совершения покупок в Алматы", 38)
+        self.assertEqual(hit[:3], (38, 38, "fuzzy"))
+        self.assertIn("совершения покупки", hit[3])
+
+    def test_ground_replaces_quote_text(self):
+        f = Finding(source="llm:x", category="ambiguity", title="t",
+                    quotes=[Quote(text="Месяц определяется по дате совершения покупок в Алматы", line=38)])
+        self.assertTrue(self.g.ground(f))
+        self.assertIn("совершения покупки", f.quotes[0].text)
