@@ -487,7 +487,8 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
     kind_by_rid = {r.rid: r.kind for r in reqs}
     for f in merged:
         kinds = {kind_by_rid.get(r) for r in f.rids}
-        if (f.category == "contradiction" and f.proof == "Д"
+        # «противоречие» и «некорректность» с двумя несовместимыми цитатами — по сути одно и то же
+        if (f.category in ("contradiction", "incorrect") and f.proof == "Д"
                 and (not f.judge or (f.judge == "confirmed" and "тяжесть" not in (f.judge_change or "")))
                 and kinds & {"FR", "AC"} and len({q.line_start for q in f.quotes}) >= 2
                 and (kinds & {"FR"}) and f.severity != "blocker"):
