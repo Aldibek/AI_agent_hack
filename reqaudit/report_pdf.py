@@ -131,6 +131,12 @@ def build_html(result: RunResult) -> str:
             H.append(f"<p><b>Исправить:</b> {_c(f.suggestion)}</p>")
         if f.question and f.question.text:
             H.append(f"<p><b>Вопрос:</b> {_c(f.question.text)}</p>")
+    rej = [f for f in result.rejected if f.judge_note and not f.judge_note.startswith("Снято по ответу")]
+    if rej:
+        H.append("<h2>Отклонено критиком</h2><p class='muted'>Находки ревьюеров, которые критик снял со ссылкой на "
+                 "документ. Показаны для прозрачности: решение можно оспорить.</p>")
+        for f in rej:
+            H.append(f"<p class='row'><b>{_c(f.title)}</b> <span class='muted'>— {_c(f.judge_note)}</span></p>")
     rows = [("Документ", f"{title} ({doc.name})"), ("SHA-256", doc.sha256[:16] + "…"), ("Дата прогона", when)]
     if result.reviewers:
         rows.append(("Модель-ревьюер", f"{result.reviewers[0].model}, проходов {len(result.reviewer_labels)}"))
