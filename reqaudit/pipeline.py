@@ -54,7 +54,8 @@ class RunResult(BaseModel):
     budget_stop: str = ""  # причина остановки по бюджету (пусто — бюджет не исчерпан)
     finished_at: str = ""  # дата и время окончания прогона (для паспорта и HTML)
     budget_blocked: list[str] = Field(default_factory=list)  # отдельные вызовы, не поместившиеся в бюджет прогона
-    coverage: dict[str, dict] = Field(default_factory=dict)  # R-xx → {"status": ok|defect|unchecked, "note": ...}
+    coverage: dict[str, dict] = Field(default_factory=dict)
+    ac_coverage: list[dict] = Field(default_factory=list)  # [{rid, covered_by: [R-xx критериев приёмки], gap}]  # R-xx → {"status": ok|defect|unchecked, "note": ...}
     steps: dict[str, str] = Field(default_factory=dict)  # шаг → ok | budget | error | skipped (для честного «Режима»)
 
 
@@ -301,15 +302,37 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
         est, unpriced = tracker.preflight(planned)
         log(f"оценка стоимости прогона: ${est:.2f} за {len(planned)} вызовов"
             + (f" (+ н/д для {', '.join(unpriced)})" if unpriced else "")
-            + f"; бюджет прогона ${tracker.run_limit:.2f}, за сутки потрачено ${tracker.daily_spent:.2f} "
-              f"из ${tracker.daily_limit:.2f}")
-        if est > tracker.run_limit and not force_budget:
+            + (f"; бюджет прогона ${tracker.run_limit:.2f}" if tracker.run_limit >= 0 else ""))
+        if tracker.run_limit >= 0 and est > tracker.run_limit and not force_budget:
             raise BudgetExceeded(f"Оценка стоимости прогона {costs.fmt_usd(est)} превышает бюджет REQAUDIT_BUDGET_USD="
                                  f"{costs.fmt_usd(tracker.run_limit)}. Прогон не начат; увеличьте бюджет или запустите "
                                  f"с --force-budget.", limit_usd=tracker.run_limit, preflight=True)
         log(f"консилиум: {', '.join(t[2] for t in tasks)} (параллельно)")
 
         raw_cov: dict[str, list] = {}  # покрытие по требованиям от прохода 0: метка прохода → тройки
+        ac_rids = [r.rid for r in reqs if r.kind == "AC"]
+
+        def ac_pass():
+            """Какие требования проверяются критериями приёмки и чего не хватает (параллельно ревьюерам)."""
+            started = time.time()
+            client = clients[reviewers[0]]
+            data = client.chat_json(prompts.AC_SYSTEM, user, max_tokens=24000, role="coverage",
+                                    deadline=float(os.getenv("REQAUDIT_REVIEW_DEADLINE", "480")))
+            known = {r.rid: r for r in reqs}
+            rows = []
+            for it in data.get("ac_coverage") or []:
+                if not isinstance(it, dict) or str(it.get("rid")) not in known:
+                    continue
+                rid = str(it["rid"])
+                if known[rid].kind in ("AC", "GOAL", "REQ"):
+                    continue
+                by = [str(x) for x in (it.get("covered_by") or []) if str(x) in ac_rids]
+                rows.append({"rid": rid, "covered_by": sorted(set(by), key=by.index),
+                             "gap": str(it.get("gap") or "")[:300]})
+            covered = sum(1 for x in rows if x["covered_by"])
+            log(f"  покрытие критериями приёмки: {covered} из {len(rows)} требований за {time.time() - started:.0f} с")
+            return rows
+
 
         def review(task):
             client, variant, label = task
@@ -322,7 +345,8 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
             log(f"  ревьюер {label}: {len(fs)} находок за {time.time() - started:.0f} с")
             return fs
 
-        with ThreadPoolExecutor(max_workers=max(1, len(tasks))) as ex:
+        with ThreadPoolExecutor(max_workers=max(1, len(tasks)) + 1) as ex:
+            ac_future = ex.submit(ac_pass) if ac_rids else None
             futures = [(t, ex.submit(review, t)) for t in tasks]
             for t, fut in futures:
                 try:
@@ -336,6 +360,15 @@ def run(doc_path: str, *, use_llm: bool = True, cache_dir: Path | None = None,
                 except (LLMError, ValueError) as e:
                     result.failures.append(f"Ревьюер {t[2]} недоступен: {str(e)[:200]}")
                     log(f"  ревьюер {t[2]} упал: {str(e)[:160]}")
+            if ac_future is not None:
+                try:
+                    result.ac_coverage = ac_future.result()
+                    result.steps["ac"] = "ok"
+                except BudgetExceeded as e:
+                    _budget_stopped(result, e, "Покрытие критериями приёмки")
+                except (LLMError, ValueError) as e:
+                    result.steps["ac"] = "error"
+                    result.failures.append(f"Покрытие критериями приёмки не построено: {str(e)[:200]}")
         ok_rev = len(tasks) - sum(1 for x in result.failures if x.startswith("Ревьюер ")) \
             - sum(1 for x in result.budget_blocked if x.startswith("Ревьюер "))
         result.steps["reviewers"] = f"{max(ok_rev, 0)}/{len(tasks)}"

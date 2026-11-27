@@ -33,7 +33,7 @@ DEFAULT_PRICES: dict[str, dict[str, float]] = {
 CHARS_PER_TOKEN = 3.5
 MIN_OUTPUT_ESTIMATE = 2000  # роль без дефолта и без истории
 # выход на вызов по роли, если в журнале нет истории этой роли и модели (reasoning-токены входят в выход)
-DEFAULT_OUTPUT_ESTIMATE = {"reviewer": 12000, "judge": 8000}
+DEFAULT_OUTPUT_ESTIMATE = {"reviewer": 12000, "judge": 8000, "coverage": 4000}
 OUTPUT_HISTORY_WINDOW = 5  # среднее по последним N успешным вызовам роли и модели
 WARN_SHARE = 0.8
 ANOMALY_FACTOR = 2.0
@@ -67,11 +67,11 @@ def _env_float(name: str, default: float) -> float:
 
 
 def run_budget() -> float:
-    return _env_float("REQAUDIT_BUDGET_USD", 2.0)
+    return _env_float("REQAUDIT_BUDGET_USD", -1.0)  # < 0 — без лимита
 
 
 def daily_budget() -> float:
-    return _env_float("REQAUDIT_DAILY_BUDGET_USD", 15.0)
+    return _env_float("REQAUDIT_DAILY_BUDGET_USD", -1.0)  # < 0 — без лимита
 
 
 def load_prices() -> dict[str, dict[str, float]]:

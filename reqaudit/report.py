@@ -288,6 +288,21 @@ def render(result: RunResult, out_path: Path) -> str:
         for f in setf:
             L += finding_block(f, by_id, total)
 
+    # покрытие критериями приёмки
+    acc = result.ac_coverage or []
+    if acc:
+        n_cov = sum(1 for x in acc if x["covered_by"])
+        L += ["### Покрытие требований критериями приёмки", "",
+              f"Критериями приёмки проверяется **{n_cov} из {len(acc)}** проверяемых требований "
+              f"({100 * n_cov / len(acc):.0f}%). Для остальных ожидаемый результат при приёмке не задан.", "",
+              "| Требование | В документе | Проверяется критериями | Что не проверяется |", "| :--- | :--- | :--- | :--- |"]
+        for x in acc:
+            r = by_id.get(x["rid"])
+            cov_by = ", ".join(f"{c}" + (f" ({by_id[c].doc_ref})" if c in by_id and by_id[c].doc_ref else "")
+                               for c in x["covered_by"]) or "❌ нет"
+            L.append(f"| {x['rid']} | {_esc(r.doc_ref or '—') if r else '—'} | {cov_by} | {_esc(x.get('gap') or '—')} |")
+        L.append("")
+
     # 5. вопросы
     with_q = [f for f in findings if f.question]
     if with_q:

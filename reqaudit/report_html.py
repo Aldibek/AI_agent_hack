@@ -248,6 +248,23 @@ def render_html(result: RunResult, out_path: Path) -> None:
     if n_un:
         P.append(f"<p class='note'>{n_un} требований не проверены — по ним вывод о качестве не сделан.</p>")
 
+    # покрытие критериями приёмки
+    acc = result.ac_coverage or []
+    if acc:
+        by_r = {r.rid: r for r in reqs}
+        n_cov = sum(1 for x in acc if x["covered_by"])
+        P.append("<h2>Покрытие критериями приёмки</h2>"
+                 f"<p class='sub'>Критериями приёмки проверяется {n_cov} из {len(acc)} проверяемых требований "
+                 f"({100 * n_cov / len(acc):.0f}%).</p>"
+                 "<table><tr><th>ID</th><th>В документе</th><th>Критерии</th><th>Что не проверяется</th></tr>")
+        for x in acc:
+            r = by_r.get(x["rid"])
+            cls = "ok" if x["covered_by"] and not x.get("gap") else ("minor" if x["covered_by"] else "blocker")
+            P.append(f"<tr><td class='id'>{e(x['rid'])}</td><td>{e((r.doc_ref if r else '') or '—')}</td>"
+                     f"<td class='st'><span class='s {cls}'></span>{e(', '.join(x['covered_by']) or 'нет')}</td>"
+                     f"<td>{e(x.get('gap') or '—')}</td></tr>")
+        P.append("</table>")
+
     # все замечания
     P.append(f"<h2>Все замечания</h2><p class='sub'>{len(findings)} · нажмите, чтобы раскрыть. "
              "У каждого — цитата документа, проверенная программой.</p>")

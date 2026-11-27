@@ -634,6 +634,39 @@ class CoverageTest(CostsBase):
         self.assertTrue(all(c["status"] in ("defect", "unchecked") for c in res.coverage.values()))
 
 
+class AcceptanceCoverageTest(CostsBase):
+    def test_ac_matrix_parallel_and_filtered(self):
+        from reqaudit import pipeline
+        from reqaudit.report import render
+
+        spec = Path(self.tmp.name) / "ac.md"
+        spec.write_text("# ТЗ\n\n## Функциональные требования\nФ-1. Клиент задаёт порог.\n\nФ-2. Push при достижении порога.\n\n"
+                        "## Критерии приемки\n\n| Условие | Действие | Результат |\n| :--- | :--- | :--- |\n"
+                        "| Порог 100 | Покупка 100 | Push |\n", encoding="utf-8")
+
+        def answer(kw):
+            sys_txt = kw.get("system", "")
+            if "покрывают требования" in sys_txt:
+                return json.dumps({"ac_coverage": [{"rid": "R-01", "covered_by": [], "gap": "порог не проверяется"},
+                                                   {"rid": "R-02", "covered_by": ["R-03", "R-99"], "gap": ""},
+                                                   {"rid": "R-03", "covered_by": ["R-03"]},
+                                                   {"rid": "R-77", "covered_by": ["R-03"]}]}, ensure_ascii=False)
+            if "Ты — критик" in sys_txt:
+                return '{"verdicts": [], "priority": []}'
+            return '{"findings": []}'
+
+        sdk = FakeSDK(text=answer)
+        env = {"ANTHROPIC_API_KEY": "k", "REQAUDIT_REVIEWERS": "anthropic", "ANTHROPIC_FOCUS": "0", "REQAUDIT_JUDGE": "anthropic"}
+        with mock.patch.dict(os.environ, env), mock.patch("anthropic.Anthropic", return_value=sdk):
+            res = pipeline.run(str(spec), use_llm=True, cache_dir=None)
+        kinds = {r.rid: r.kind for r in res.reqs}
+        self.assertEqual(kinds.get("R-03"), "AC")
+        self.assertEqual([x["rid"] for x in res.ac_coverage], ["R-01", "R-02"])  # AC и неизвестные ID отброшены
+        self.assertEqual(res.ac_coverage[1]["covered_by"], ["R-03"])  # несуществующий критерий R-99 отброшен
+        text = render(res, Path(self.tmp.name) / "ac_report.md")
+        self.assertIn("Критериями приёмки проверяется **1 из 2**", text)
+
+
 class HumanInLoopTest(CostsBase):
     """Человека спрашиваем только там, где агент не уверен, и не больше 3 вопросов."""
 

@@ -84,9 +84,9 @@ class Progress:
 
     def __init__(self, fast: bool):
         self.fast, self.t0 = fast, time.time()
-        keys = ["read", "seg", "rules"] + ([] if fast else ["p1", "p2", "p3", "quotes", "critic"]) + ["report"]
+        keys = ["read", "seg", "rules"] + ([] if fast else ["p1", "p2", "p3", "ac", "quotes", "critic"]) + ["report"]
         names = {"read": "Читаю документ", "seg": "Делю на отдельные требования", "rules": "Проверяю правилами",
-                 "quotes": "Сверяю цитаты с документом", "critic": "Критик пытается опровергнуть каждую находку",
+                 "quotes": "Сверяю цитаты с документом", "ac": "Сверяю требования с критериями приёмки", "critic": "Критик пытается опровергнуть каждую находку",
                  "report": "Пишу заключение", **{f"p{k}": v.capitalize() for k, v in PASS_NAMES.items()}}
         self.steps = {k: {"name": names[k], "state": "wait", "detail": ""} for k in keys}
         self.steps["read"]["state"] = "run"
@@ -112,12 +112,14 @@ class Progress:
             if self.fast:
                 self.set("report", "run")
         elif line.startswith("консилиум"):
-            for k in ("p1", "p2", "p3"):
+            for k in ("p1", "p2", "p3", "ac"):
                 self.set(k, "run")
         elif m := re.match(r"ревьюер \S+?#(\d+): (\d+) находок за (\d+) с", line):
             self.set(f"p{m[1]}", "done", f"{_plural(int(m[2]), 'находка', 'находки', 'находок')} · {m[3]} с")
         elif m := re.match(r"ревьюер \S+?#(\d+) упал", line):
             self.set(f"p{m[1]}", "fail", "не ответил")
+        elif m := re.match(r"покрытие критериями приёмки: (\d+) из (\d+)", line):
+            self.set("ac", "done", f"проверяется {m[1]} из {m[2]}")
         elif m := re.match(r"проверка цитат: подтверждено (\d+), отброшено (\d+)", line):
             self.set("quotes", "done", f"подтверждено {m[1]}, отброшено {m[2]}")
             self.set("critic", "run")
@@ -284,6 +286,16 @@ def conclusion(data: dict, findings, reqs, v) -> None:
         rows.append({"ID": r.rid, "В документе": r.doc_ref or "—", "Итог": st_txt, "Замечания": note,
                      "Формулировка": (r.summary or "")[:120]})
     st.dataframe(rows, hide_index=True, width="stretch", height=min(38 * len(rows) + 40, 420))
+
+    acc = data.get("ac_coverage") or []
+    if acc:
+        n_cov = sum(1 for x in acc if x["covered_by"])
+        st.subheader("Покрытие критериями приёмки")
+        st.caption(f"Критериями приёмки проверяется {n_cov} из {len(acc)} проверяемых требований "
+                   f"({100 * n_cov / len(acc):.0f}%).")
+        st.dataframe([{"ID": x["rid"], "Проверяется критериями": ", ".join(x["covered_by"]) or "❌ нет",
+                       "Что не проверяется": x.get("gap") or "—"} for x in acc],
+                     hide_index=True, width="stretch", height=min(38 * len(acc) + 40, 360))
 
     st.subheader(f"Все замечания · {len(findings)}")
     for f in sorted(findings, key=lambda f: (SEVERITY_ORDER[f.severity], f.fid)):

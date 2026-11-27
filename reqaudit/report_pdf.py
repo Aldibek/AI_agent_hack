@@ -110,6 +110,15 @@ def build_html(result: RunResult) -> str:
             st, notes = "не проверено", _c(c.get("note", ""))
         ref = f" ({_c(r.doc_ref)})" if r.doc_ref else ""
         H.append(f"<p class='row'><b>{r.rid}</b>{ref} — {st}" + (f" <span class='muted'>{notes}</span>" if notes else "") + "</p>")
+    acc = result.ac_coverage or []
+    if acc:
+        n_cov = sum(1 for x in acc if x["covered_by"])
+        H.append(f"<h2>Покрытие критериями приёмки</h2><p>Критериями приёмки проверяется {n_cov} из {len(acc)} "
+                 f"проверяемых требований ({100 * n_cov / len(acc):.0f}%).</p>")
+        for x in acc:
+            cov_by = ", ".join(x["covered_by"]) or "<span class='red'>нет</span>"
+            gap = f" <span class='muted'>— {_c(x['gap'])}</span>" if x.get("gap") else ""
+            H.append(f"<p class='row'><b>{x['rid']}</b> — {cov_by}{gap}</p>")
     H.append("<h2>Все замечания</h2>")
     for f in sorted(findings, key=lambda f: (SEVERITY_ORDER[f.severity], f.fid)):
         H.append(f"<h3>{f.fid}. {_c(f.title)}</h3><p class='muted'><span class='{SEV_CLS[f.severity]}'>"
