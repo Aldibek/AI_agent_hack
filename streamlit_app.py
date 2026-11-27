@@ -430,10 +430,10 @@ with tab_new:
 
 with tab_sample:
     st.write("Готовое заключение по документу, выданному организаторами "
-             f"([`docs/requirements.md`](https://github.com/Aldibek/AI_agent_hack/blob/main/docs/requirements.md)): "
+             f"([`docs/requirements.pdf`](https://github.com/Aldibek/AI_agent_hack/blob/main/docs/requirements.pdf)): "
              "полная проверка Claude Opus 5.5. Открывается мгновенно.")
     if (SAMPLE_REPORT / "report.json").exists():
-        show(SAMPLE_REPORT, "Уведомление о расходах по карте · requirements.md")
+        show(SAMPLE_REPORT, "Уведомление о расходах по карте · requirements.pdf")
         st.caption("Ответы на вопросы агента откроют перепроверенное заключение во вкладке «Проверить свой документ».")
     else:
         st.info("Готового отчёта нет: запустите `python -m reqaudit docs/requirements.md submission/report.md`.")
