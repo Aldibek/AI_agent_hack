@@ -74,8 +74,9 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
     return f"{n} {w}"
 
 
+PASS_OF = {1: 1, 2: 2, 3: 3, 4: 2, 5: 3}  # ревьюер #n → шаг (проходы 2 и 3 идут дважды независимо)
 PASS_NAMES = {1: "проход 1 · каждое требование по отдельности", 2: "проход 2 · общий разбор за пять ролей",
-              3: "проход 3 · «два разработчика» и лазейки"}
+              3: "проход 3 · «два разработчика» и лазейки"}  # 2 и 3 — по два независимых запуска
 HIDDEN = re.compile(r"оценка стоимости|стоимость прогона|бюджет|расход|\$\d", re.I)
 
 
@@ -84,6 +85,8 @@ class Progress:
 
     def __init__(self, fast: bool):
         self.fast, self.t0 = fast, time.time()
+        self.found: dict[str, int] = {}
+        self.done_runs: dict[str, int] = {}
         keys = ["read", "seg", "rules"] + ([] if fast else ["p1", "p2", "p3", "ac", "quotes", "critic"]) + ["report"]
         names = {"read": "Читаю документ", "seg": "Делю на отдельные требования", "rules": "Проверяю правилами",
                  "quotes": "Сверяю цитаты с документом", "ac": "Сверяю требования с критериями приёмки", "critic": "Критик пытается опровергнуть каждую находку",
@@ -115,9 +118,15 @@ class Progress:
             for k in ("p1", "p2", "p3", "ac"):
                 self.set(k, "run")
         elif m := re.match(r"ревьюер \S+?#(\d+): (\d+) находок за (\d+) с", line):
-            self.set(f"p{m[1]}", "done", f"{_plural(int(m[2]), 'находка', 'находки', 'находок')} · {m[3]} с")
+            k = f"p{PASS_OF.get(int(m[1]), m[1])}"
+            n = int(m[2]) + self.found.get(k, 0)
+            self.found[k] = n
+            self.done_runs[k] = self.done_runs.get(k, 0) + 1
+            total = 1 if k == "p1" else 2
+            state = "done" if self.done_runs[k] >= total else "run"
+            self.set(k, state, f"{_plural(n, 'находка', 'находки', 'находок')}" + ("" if state == "done" else f" · {self.done_runs[k]}/{total}"))
         elif m := re.match(r"ревьюер \S+?#(\d+) упал", line):
-            self.set(f"p{m[1]}", "fail", "не ответил")
+            self.set(f"p{PASS_OF.get(int(m[1]), m[1])}", "fail", "не ответил")
         elif m := re.match(r"покрытие критериями приёмки: (\d+) из (\d+)", line):
             self.set("ac", "done", f"проверяется {m[1]} из {m[2]}")
         elif m := re.match(r"проверка цитат: подтверждено (\d+), отброшено (\d+)", line):
