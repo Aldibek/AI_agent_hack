@@ -443,29 +443,40 @@ class AnthropicClient:
             self.stats.llm_calls += 1
         msg, err, request_id = None, "", ""
         usage = None
-        try:
-            api = self.sdk.beta.messages if self.fallback else self.sdk.messages
-            body = req if self.fallback else {k: v for k, v in req.items() if k not in ("betas", "fallbacks")}
-            with api.stream(**body) as stream:
-                request_id = _stream_request_id(stream)
-                for _event in stream:
-                    if time.time() > deadline_at:
-                        usage = getattr(_snapshot(stream), "usage", None)
-                        err = "превышен бюджет времени"
-                        break
-                if not err:
-                    msg = stream.get_final_message()
-                    request_id = getattr(msg, "_request_id", None) or request_id
-        except anthropic.AuthenticationError as e:
-            err, request_id = f"неверный ANTHROPIC_API_KEY (401): {e.message}", e.request_id or ""
-        except anthropic.NotFoundError as e:
-            err, request_id = f"модель {self.model} не найдена (404): {e.message}", e.request_id or ""
-        except anthropic.RateLimitError as e:
-            err, request_id = f"лимит запросов (429) после повторов: {e.message}", e.request_id or ""
-        except anthropic.APIStatusError as e:
-            err, request_id = f"HTTP {e.status_code}: {e.message}", e.request_id or ""
-        except anthropic.APIConnectionError as e:
-            err = f"{type(e).__name__}: {e}"
+        attempts = int(os.getenv("ANTHROPIC_STREAM_RETRIES", "2")) + 1
+        for attempt in range(1, attempts + 1):
+            msg, err, retryable = None, "", False
+            try:
+                api = self.sdk.beta.messages if self.fallback else self.sdk.messages
+                body = req if self.fallback else {k: v for k, v in req.items() if k not in ("betas", "fallbacks")}
+                with api.stream(**body) as stream:
+                    request_id = _stream_request_id(stream)
+                    for _event in stream:
+                        if time.time() > deadline_at:
+                            usage = getattr(_snapshot(stream), "usage", None)
+                            err = "превышен бюджет времени"
+                            break
+                    if not err:
+                        msg = stream.get_final_message()
+                        request_id = getattr(msg, "_request_id", None) or request_id
+            except anthropic.AuthenticationError as e:
+                err, request_id = f"неверный ANTHROPIC_API_KEY (401): {e.message}", e.request_id or ""
+            except anthropic.NotFoundError as e:
+                err, request_id = f"модель {self.model} не найдена (404): {e.message}", e.request_id or ""
+            except anthropic.RateLimitError as e:
+                err, request_id, retryable = f"лимит запросов (429) после повторов: {e.message}", e.request_id or "", True
+            except anthropic.APIStatusError as e:
+                err, request_id = f"HTTP {e.status_code}: {e.message}", e.request_id or ""
+                retryable = e.status_code >= 500
+            except anthropic.APIConnectionError as e:
+                err, retryable = f"{type(e).__name__}: {e}", True
+            except Exception as e:  # noqa: BLE001 — обрыв посреди потока приходит «сырой» ошибкой транспорта (ReadTimeout и т.п.)
+                err, retryable = f"обрыв соединения во время ответа ({type(e).__name__}: {str(e)[:120]})", True
+            if not (err and retryable and attempt < attempts and time.time() + 10 * attempt < deadline_at):
+                break
+            with self._lock:
+                self.stats.events.append(f"{self.label} ({role}): {err[:120]} — повтор {attempt}/{attempts - 1}")
+            time.sleep(10 * attempt)
         latency = time.time() - started
         if msg is not None:
             usage = msg.usage

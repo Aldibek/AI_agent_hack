@@ -634,6 +634,39 @@ class CoverageTest(CostsBase):
         self.assertTrue(all(c["status"] in ("defect", "unchecked") for c in res.coverage.values()))
 
 
+class StreamDropTest(CostsBase):
+    """Обрыв соединения посреди потока (ReadTimeout) не роняет прогон: повтор, затем понятная ошибка."""
+
+    def _sdk(self, fails: int):
+        sdk = FakeSDK()
+        state = {"n": 0}
+
+        class DropStream(FakeStream):
+            def __iter__(self):
+                state["n"] += 1
+                if state["n"] <= fails:
+                    raise TimeoutError("The read operation timed out")
+                return iter(())
+
+        sdk.beta.messages.stream = lambda **kw: (sdk.requests.append(kw), DropStream(sdk, kw))[1]
+        return sdk
+
+    def test_retry_after_drop(self):
+        sdk = self._sdk(fails=1)
+        c = self.client(sdk)
+        with mock.patch("time.sleep"):
+            self.assertEqual(json.loads(c.chat([{"role": "user", "content": "x"}])), {"findings": []})
+        self.assertEqual(len(sdk.requests), 2)
+
+    def test_gives_llm_error_not_crash(self):
+        sdk = self._sdk(fails=10)
+        c = self.client(sdk)
+        with mock.patch("time.sleep"), self.assertRaises(LLMError) as cm:
+            c.chat([{"role": "user", "content": "x"}])
+        self.assertIn("обрыв соединения", str(cm.exception))
+        self.assertEqual(len(sdk.requests), 3)  # 1 попытка + 2 повтора
+
+
 class AcceptanceCoverageTest(CostsBase):
     def test_ac_matrix_parallel_and_filtered(self):
         from reqaudit import pipeline
